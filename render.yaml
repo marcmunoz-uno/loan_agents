@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: tranchi-deal-flow-agents
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt && python ops/seed_data.py
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TRANCHI_API_SECRET
+        sync: false
+      - key: LENDER_WEBHOOK_SECRET
+        sync: false
+      - key: OUTBOUND_AGENT_URL
+        value: https://tranchi-outbound-agent.onrender.com
+      - key: DB_PATH
+        value: /opt/render/project/data/dealflow.db
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+    disk:
+      name: dealflow-data
+      mountPath: /opt/render/project/data
+      sizeGB: 1
+    healthCheckPath: /health
+    autoDeploy: true
