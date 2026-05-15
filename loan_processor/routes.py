@@ -279,8 +279,8 @@ def check_guidelines():
 @require_tranchi_auth
 def processor_chat():
     """
-    Casey conversational interface. MLO or borrower asks a guideline question
-    and Casey answers with specifics from the guidelines.
+    Tranchi - Loan Processor conversational interface. MLO or borrower asks a
+    guideline question and gets specifics from the guidelines back.
 
     Body: {"user_id": "...", "message": "...", "lender_id": "...", "context": {...}}
     """
@@ -305,7 +305,7 @@ def processor_chat():
             idx = engine.get_index()
             guidelines_ctx = f"\n\nGUIDELINES INDEX:\n{json.dumps(idx, indent=2)[:3000]}"
     else:
-        # Give Casey the full index for general questions
+        # Provide the full index for general questions
         engine = get_engine()
         idx = engine.get_index()
         guidelines_ctx = f"\n\nGUIDELINES INDEX:\n{json.dumps(idx, indent=2)[:3000]}"
@@ -327,7 +327,7 @@ def processor_chat():
     return jsonify({
         "user_id": user_id,
         "reply": reply,
-        "agent": "AI Loan Processor (Casey)",
+        "agent": "Tranchi - Loan Processor",
     })
 
 

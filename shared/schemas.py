@@ -163,7 +163,7 @@ class ChatMessage(BaseModel):
     context: dict[str, Any] = {}
 
 
-# ── Loan Processor (Casey) schemas ────────────────────────────────────────────
+# ── Loan Processor schemas ────────────────────────────────────────────────────
 
 class Condition(BaseModel):
     """An underwriting condition — doc request, clarification, escrow holdback, or repair."""

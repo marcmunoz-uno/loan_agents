@@ -15,9 +15,9 @@
 │             tranchi-deal-flow-agents (this repo)                     │
 │                        Flask · :5010                                 │
 │  ┌────────────────────┐  ┌──────────────────┐  ┌─────────────────┐ │
-│  │  AI Loan Officer   │  │  Loan Processor  │  │ TX Coordinator  │ │
-│  │  (Alex)            │  │  (Casey)         │  │ (Sam)           │ │
-│  │  /api/loan/*       │  │  /api/processor/*│  │ /api/tx/*       │ │
+│  │  Tranchi -         │  │  Tranchi -       │  │  Tranchi -      │ │
+│  │  Loan Officer      │  │  Loan Processor  │  │  TX Coordinator │ │
+│  │  /api/loan/*       │  │  /api/processor/*│  │  /api/tx/*      │ │
 │  │                    │  │                  │  │                 │ │
 │  │  prequal →         │◄─┤  pre_underwrite()│  │ PSA → timeline  │ │
 │  │  application →     │  │  guideline_engine│  │ milestones →    │ │
@@ -61,10 +61,10 @@ County Portal Scraper ───────────────────�
 
 ---
 
-## Sequence: Alex → Casey → Arive (New)
+## Sequence: Loan Officer → Loan Processor → Arive
 
 ```
-Borrower / Web App          Alex (Loan Officer)      Casey (Processor)         Arive LOS
+Borrower / Web App          Tranchi - Loan Officer   Tranchi - Loan Processor   Arive LOS
      │                            │                        │                       │
      │  POST /api/loan/prequal    │                        │                       │
      │──────────────────────────► │                        │                       │

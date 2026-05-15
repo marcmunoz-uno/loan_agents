@@ -1,6 +1,6 @@
-# Casey — AI Loan Processor
+# Tranchi - Loan Processor
 
-Casey pre-underwrites every loan file before it hits a lender's desk. She reads lender guidelines, scores the deal, generates conditions, flags red flags, and drafts the credit memo.
+The Loan Processor pre-underwrites every loan file before it hits a lender's desk. It reads lender guidelines, scores the deal, generates conditions, flags red flags, and drafts the credit memo.
 
 ## Endpoints
 
@@ -79,7 +79,7 @@ curl -X POST http://localhost:5010/api/processor/guidelines/check \
 
 ### POST /api/processor/chat
 
-Casey conversational interface. Ask a guideline question.
+Conversational interface for the Tranchi - Loan Processor. Ask a guideline question.
 
 ```bash
 curl -X POST http://localhost:5010/api/processor/chat \
@@ -151,15 +151,15 @@ curl -X POST http://localhost:5010/api/processor/fire-zap/ready-for-underwriting
 }
 ```
 
-## Alex → Casey → Arive Flow
+## Loan Officer → Loan Processor → Arive Flow
 
 ```
-Alex (Loan Officer)
+Tranchi - Loan Officer
   POST /api/loan/application → application created
   POST /api/loan/application/:id/documents → all docs uploaded
         │
         ▼
-Casey (Loan Processor)
+Tranchi - Loan Processor
   POST /api/processor/pre-underwrite/:id → runs pre-UW
     if clean → automatically fires Zapier → Arive "Ready for Submission"
     if conditional → fires Zapier note with conditions, does not advance status
@@ -171,7 +171,7 @@ Arive LOS (via Zapier)
   Arive fires webhook back → POST /api/loan/webhook/arive-update
         │
         ▼
-Alex (Loan Officer)
+Tranchi - Loan Officer
   Status updated in our DB
   Application advances to UNDERWRITING → APPROVED / CONDITIONS / DECLINED
 ```

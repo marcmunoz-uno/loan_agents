@@ -135,7 +135,7 @@ curl -X POST http://localhost:5010/api/loan/webhook/lender-update \
 
 ### POST /api/loan/chat
 
-Conversational AI loan officer (Alex).
+Conversational interface for the Tranchi - Loan Officer.
 
 ```bash
 curl -X POST http://localhost:5010/api/loan/chat \

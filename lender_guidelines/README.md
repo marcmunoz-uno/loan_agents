@@ -1,6 +1,6 @@
 # Lender Guidelines
 
-This directory stores underwriting guidelines for each lender-product combination supported by Tranchi's Loan Processor agent (Casey).
+This directory stores underwriting guidelines for each lender-product combination supported by the Tranchi - Loan Processor.
 
 ## Structure
 
@@ -11,11 +11,11 @@ Each file covers one lender + product combination:
 guidelines_index.json              — Machine-readable matrix for fast programmatic lookup
 ```
 
-## How Casey uses these
+## How the Loan Processor uses these
 
 1. `guideline_engine.py` loads `guidelines_index.json` at startup to build the matching matrix.
-2. When a pre-underwriting check runs, Casey filters the index by FICO / LTV / DSCR / property type / state to produce a ranked lender list.
-3. For the top matches, Casey loads the full `.md` file and passes it as context to the LLM when generating the credit memo and condition list.
+2. When a pre-underwriting check runs, the engine filters the index by FICO / LTV / DSCR / property type / state to produce a ranked lender list.
+3. For the top matches, the engine loads the full `.md` file and passes it as context to the LLM when generating the credit memo and condition list.
 
 ## Adding a new lender
 
@@ -61,7 +61,7 @@ guidelines_index.json              — Machine-readable matrix for fast programm
 
 ## Rate sheet note
 
-Rates change weekly. The ranges in each file and in `guidelines_index.json` (`rate_range_pct`) are the historical bands for reference only. Always pull live pricing from the lender's broker portal or rate lock desk before quoting. Casey will never quote a specific rate to a borrower — that goes to the MLO.
+Rates change weekly. The ranges in each file and in `guidelines_index.json` (`rate_range_pct`) are the historical bands for reference only. Always pull live pricing from the lender's broker portal or rate lock desk before quoting. The Loan Processor will never quote a specific rate to a borrower — that goes to the MLO.
 
 ## Updating guidelines
 

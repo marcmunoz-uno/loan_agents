@@ -22,10 +22,10 @@
 
 ---
 
-## ✅ Agent 3 (new): Loan Processor (Casey)
+## ✅ Agent 3 (new): Loan Processor
 **What it does:** Pre-underwrites every file before it hits a lender's desk. Reads lender guidelines (9 products across 6 lenders), runs DSCR/LTV/FICO checks, generates condition lists, flags red flags, drafts credit memos via LLM, and fires Arive/Zapier `ready_for_underwriting` event on clean files.
 **Complexity:** M
-**Integrations:** Alex (loan officer), Arive LOS via Zapier (auto-pushes clean files), 9 lender guideline docs + `guidelines_index.json`
+**Integrations:** Tranchi - Loan Officer, Arive LOS via Zapier (auto-pushes clean files), 9 lender guideline docs + `guidelines_index.json`
 **Status:** Scaffolded in this repo
 **To go live:** Add real Zapier webhook URLs to `.env`, tune DSCR thresholds if lenders change programs, connect to Arive inbound webhook from Zapier
 

@@ -672,5 +672,5 @@ def loan_chat():
     return jsonify({
         "user_id": req.user_id,
         "reply": reply,
-        "agent": "AI Loan Officer (Alex)",
+        "agent": "Tranchi - Loan Officer",
     })

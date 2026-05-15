@@ -10,9 +10,9 @@ The 10-agent lineup below represents the full deal-flow automation stack for a r
 
 | # | Agent | Status |
 |---|-------|--------|
-| 1 | **AI Loan Officer (Alex)** | ✅ scaffolded + Arive/Zapier wired |
-| 2 | **Transaction Coordinator (Sam)** | ✅ scaffolded |
-| 3 | **Loan Processor (Casey)** | ✅ scaffolded |
+| 1 | **Tranchi - Loan Officer** | ✅ scaffolded + Arive/Zapier wired |
+| 2 | **Tranchi - Transaction Coordinator** | ✅ scaffolded |
+| 3 | **Tranchi - Loan Processor** | ✅ scaffolded |
 | 4 | Title & Escrow Coordinator | ROADMAP |
 | 5 | Inspection Coordinator | ROADMAP |
 | 6 | Property Manager Sourcer | ROADMAP |
@@ -59,13 +59,13 @@ Set `ANTHROPIC_API_KEY` in `.env` to enable the `/chat` endpoints.
 ```
 Tranchi Web App (Express + tRPC + React)
   └─► tranchi-deal-flow-agents (this repo, :5010)
-        ├── AI Loan Officer (Alex)   /api/loan/*
-        │     ├─► Loan Processor (Casey) /api/processor/* (internal)
+        ├── Tranchi - Loan Officer        /api/loan/*
+        │     ├─► Tranchi - Loan Processor /api/processor/* (internal)
         │     │     └─► lender_guidelines/ (9 lenders, guidelines_index.json)
         │     ├─► Zapier webhooks → Arive LOS (outbound events)
         │     ├─► POST /api/loan/webhook/arive-update (inbound from Arive)
         │     └─► Lender Partners (Lima One, Kiavi, New Silver, LendingOne, Roc, Anchor)
-        └── TX Coordinator (Sam)     /api/tx/*
+        └── Tranchi - Transaction Coordinator  /api/tx/*
               └─► tranchi-outbound-agent (Hope voice / iMessage)
                     └─► Title, Inspector, Insurance via outbound comms
 
@@ -98,9 +98,9 @@ app.py                      # Flask entry point — registers all blueprints
 shared/                     # Auth, DB, LLM, webhooks, Pydantic schemas
   migrations/001_initial.sql       # Base tables (loan officer + TX coordinator)
   migrations/002_loan_processor.sql # Loan processor tables
-loan_officer/               # AI Loan Officer Alex (blueprint: /api/loan/*)
+loan_officer/               # Tranchi - Loan Officer backend (blueprint: /api/loan/*)
   arive_zapier.py           # Arive/Zapier two-way integration
-  system_prompt.md          # Alex's full persona and rules
+  system_prompt.md          # Loan Officer persona + rules
   workflows.py              # State machine: NEW → ... → FUNDED
   lender_router.py          # Product scoring + lender matching
   prequal.py                # DSCR/LTV/fit-score computation
@@ -109,16 +109,16 @@ loan_officer/               # AI Loan Officer Alex (blueprint: /api/loan/*)
   routes.py                 # 9 Flask endpoints (incl. arive-update webhook)
   tests/test_workflow.py    # State machine + prequal + router tests
   tests/test_arive_zapier.py# Arive/Zapier integration tests
-loan_processor/             # AI Loan Processor Casey (blueprint: /api/processor/*)
-  system_prompt.md          # Casey's persona + job + guardrails
+loan_processor/             # Tranchi - Loan Processor backend (blueprint: /api/processor/*)
+  system_prompt.md          # Loan Processor persona + job + guardrails
   pre_underwriting.py       # Core pre-UW engine + PreUnderwritingReport
   guideline_engine.py       # Loads + queries lender_guidelines/
   condition_generator.py    # Generates condition lists per product + lender
   credit_memo.py            # Drafts LLM-powered credit memos
   routes.py                 # 6 Flask endpoints
   tests/test_pre_underwriting.py
-tx_coordinator/             # Transaction Coordinator Sam (blueprint: /api/tx/*)
-  system_prompt.md          # Sam's persona and escalation rules
+tx_coordinator/             # Tranchi - Transaction Coordinator backend (blueprint: /api/tx/*)
+  system_prompt.md          # Transaction Coordinator persona + escalation rules
   timeline.py               # 16-milestone timeline generator
   deadline_engine.py        # Contingency deadline tracking + alerting
   parties.py                # Party management
