@@ -96,6 +96,75 @@ def _openai_chat(
     return resp.choices[0].message.content or ""
 
 
+def chat_with_tools(
+    messages: list[dict],
+    system: str,
+    tools: list[dict],
+    model_tier: Literal["standard", "reasoning"] = "standard",
+    max_tokens: int = 2048,
+    temperature: float = 0.3,
+) -> dict[str, Any]:
+    """
+    Anthropic tool-use call. Returns the structured response so the caller can
+    dispatch tool_use blocks and loop with tool_result back.
+
+    Args:
+        messages: full conversation in Anthropic format (each message may have
+                  `content` as a string OR a list of content blocks — the caller
+                  passes through whatever it built up across iterations).
+        tools:    Anthropic tools format — list of {name, description, input_schema}.
+
+    Returns:
+        {
+          "stop_reason": "end_turn" | "tool_use" | ...,
+          "content":     list of content blocks (text, tool_use),
+          "model":       string,
+        }
+
+    Raises RuntimeError if no Anthropic key is configured — tool calling is
+    not implemented on the OpenAI fallback path. The caller can decide to
+    degrade to plain `chat()` if it catches this.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "chat_with_tools requires ANTHROPIC_API_KEY. Tool calling is not "
+            "wired on the OpenAI fallback."
+        )
+
+    model = (
+        ANTHROPIC_REASONING_MODEL if model_tier == "reasoning"
+        else ANTHROPIC_STANDARD_MODEL
+    )
+    client = _get_anthropic()
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
+        "tools": tools,
+    }
+    if "opus-4" not in model:
+        kwargs["temperature"] = temperature
+
+    last_err: Exception | None = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = client.messages.create(**kwargs)
+            return {
+                "stop_reason": resp.stop_reason,
+                "content": [block.model_dump() for block in resp.content],
+                "model": resp.model,
+            }
+        except Exception as e:
+            last_err = e
+            print(f"[llm] chat_with_tools attempt {attempt + 1} failed: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+
+    raise RuntimeError(f"chat_with_tools exhausted retries. Last error: {last_err}")
+
+
 def chat(
     messages: list[dict],
     system: str = "",
