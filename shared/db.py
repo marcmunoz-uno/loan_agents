@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 DB_PATH = os.environ.get("DB_PATH", "data/dealflow.db")
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_initial.sql"
+MIGRATION_002_PATH = Path(__file__).parent / "migrations" / "002_loan_processor.sql"
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -39,12 +40,14 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Run the initial migration if tables don't exist yet."""
-    if not MIGRATION_PATH.exists():
-        raise FileNotFoundError(f"Migration file not found: {MIGRATION_PATH}")
-    sql = MIGRATION_PATH.read_text()
+    """Run all migrations in order. Safe to call multiple times (CREATE IF NOT EXISTS)."""
+    migrations = [MIGRATION_PATH, MIGRATION_002_PATH]
     with get_conn() as conn:
-        conn.executescript(sql)
+        for path in migrations:
+            if not path.exists():
+                raise FileNotFoundError(f"Migration file not found: {path}")
+            sql = path.read_text()
+            conn.executescript(sql)
         conn.commit()
 
 

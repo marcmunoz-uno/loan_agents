@@ -22,7 +22,16 @@
 
 ---
 
-## Agent 3: Title & Escrow Coordinator
+## ✅ Agent 3 (new): Loan Processor (Casey)
+**What it does:** Pre-underwrites every file before it hits a lender's desk. Reads lender guidelines (9 products across 6 lenders), runs DSCR/LTV/FICO checks, generates condition lists, flags red flags, drafts credit memos via LLM, and fires Arive/Zapier `ready_for_underwriting` event on clean files.
+**Complexity:** M
+**Integrations:** Alex (loan officer), Arive LOS via Zapier (auto-pushes clean files), 9 lender guideline docs + `guidelines_index.json`
+**Status:** Scaffolded in this repo
+**To go live:** Add real Zapier webhook URLs to `.env`, tune DSCR thresholds if lenders change programs, connect to Arive inbound webhook from Zapier
+
+---
+
+## Agent 4 (was 3): Title & Escrow Coordinator
 **Priority:** 1 (next to build — blocking TX Coordinator for full close automation)
 **Gap:** Title ordering and escrow management are manual. No integration with title companies.
 **What it does:** Submits title order to title company API, tracks title search status, flags liens/encumbrances, coordinates escrow account funding, monitors wire instructions, confirms recording.

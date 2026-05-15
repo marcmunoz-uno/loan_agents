@@ -271,6 +271,109 @@ def seed():
         )
         conn.commit()
 
+    # ── Sample Pre-Underwriting Report ────────────────────────────────────────
+    conditions_sample = [
+        {
+            "condition_type": "doc_request",
+            "severity": "prior_to_submission",
+            "description": "Tri-merge credit report (lender will order — do not submit broker-pulled credit)",
+            "lender_specific": "lima_one_dscr",
+            "required": True,
+        },
+        {
+            "condition_type": "doc_request",
+            "severity": "prior_to_submission",
+            "description": "Executed purchase contract",
+            "lender_specific": "all",
+            "required": True,
+        },
+        {
+            "condition_type": "doc_request",
+            "severity": "prior_to_close",
+            "description": "DSCR appraisal with market rent schedule (Form 1007)",
+            "lender_specific": "lima_one_dscr",
+            "required": True,
+        },
+        {
+            "condition_type": "doc_request",
+            "severity": "prior_to_close",
+            "description": "Bank statements — 2 most recent months, all pages (6 months PITI reserves)",
+            "lender_specific": "lima_one_dscr",
+            "required": True,
+        },
+    ]
+    lender_fit_sample = [
+        {
+            "lender_id": "lima_one_dscr",
+            "lender": "Lima One Capital",
+            "product": "DSCR Long-Term Rental",
+            "product_type": "dscr",
+            "fit_score": 88,
+            "qualifies": True,
+            "qualify_reasons": ["FICO 740 meets min 660", "LTV 64.8% within 80% max", "DSCR 1.18 meets min 1.10"],
+            "decline_reasons": [],
+            "hot_buttons": ["DSCR calculated on gross rent only", "Short-term rental proration applies"],
+            "rate_range_pct": [7.25, 9.5],
+        },
+        {
+            "lender_id": "kiavi_dscr",
+            "lender": "Kiavi",
+            "product": "Rental Loan (DSCR)",
+            "product_type": "dscr",
+            "fit_score": 85,
+            "qualifies": True,
+            "qualify_reasons": ["FICO 740 meets min 640", "LTV 64.8% within 80% max", "DSCR 1.18 meets min 1.00"],
+            "decline_reasons": [],
+            "hot_buttons": ["No condos for DSCR", "Max 10 financed properties"],
+            "rate_range_pct": [7.0, 9.25],
+        },
+    ]
+
+    with get_conn() as conn:
+        conn.execute("DELETE FROM pre_underwriting_reports WHERE application_id = ?", (app_id,))
+        conn.commit()
+        insert(conn, "pre_underwriting_reports", {
+            "application_id": app_id,
+            "status": "clean",
+            "summary": "Clean file for Lima One DSCR — 2 PTSU conditions",
+            "overall_status": "clean",
+            "lender_fit": json.dumps(lender_fit_sample),
+            "conditions": json.dumps(conditions_sample),
+            "red_flags": json.dumps([]),
+            "computed_metrics": json.dumps({
+                "fico": 740,
+                "loan_amount": 71250.0,
+                "ltv": 0.648,
+                "ltc": 0.0,
+                "monthly_pni": 522.48,
+                "monthly_piti": 722.48,
+                "monthly_cashflow": 477.52,
+                "dscr": 1.18,
+                "dscr_coverage_gap": 0.08,
+                "monthly_rent": 1200,
+                "arv": 0,
+                "purchase_price": 95000,
+                "rehab_budget": 0,
+                "down_pct": 25.0,
+                "product_type": "dscr",
+            }),
+            "suggested_lender": "Lima One Capital",
+            "credit_memo": (
+                "## Borrower\nMarc Munoz. Estimated FICO: 740. Reported annual income: $120,000. "
+                "Liquid assets: $85,000. Properties owned: 3. Loan purpose: purchase.\n\n"
+                "## Subject Property\n4521 Oak Ln, Detroit MI 48224. SFR. Purchase price: $95,000. "
+                "Monthly rent (projected): $1,200/mo.\n\n"
+                "## Transaction\nPurchase. Loan amount: $71,250. 25% down. LTV 64.8%.\n\n"
+                "## Cash Flow\nDSCR 1.18 (proforma). Monthly PITI: $722. Net cash flow: +$478/mo.\n\n"
+                "## Risk Factors\nProforma rent — appraiser must confirm. DSCR has 8bps coverage "
+                "above Lima One's 1.10 floor. Minor sensitivity to appraisal.\n\n"
+                "## Recommendation\nClean file. Submit to Lima One DSCR as primary. "
+                "Kiavi as backup (1.00 DSCR min). Clear PTSU conditions first."
+            ),
+            "generated_at": now,
+        })
+        print(f"[seed] Created pre-underwriting report for: {app_id}")
+
     print("\n[seed] Done. Sample IDs:")
     print(f"  Prequal:     {prequal_id}")
     print(f"  Application: {app_id}")
@@ -279,6 +382,8 @@ def seed():
     print(f"  curl http://localhost:5010/health")
     print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/loan/prequal/{prequal_id}")
     print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/tx/{tx_id}")
+    print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/processor/pre-underwrite/{app_id}")
+    print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/processor/guidelines")
 
 
 if __name__ == "__main__":

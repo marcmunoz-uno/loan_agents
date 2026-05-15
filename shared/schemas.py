@@ -161,3 +161,43 @@ class ChatMessage(BaseModel):
     user_id: str
     message: str
     context: dict[str, Any] = {}
+
+
+# ── Loan Processor (Casey) schemas ────────────────────────────────────────────
+
+class Condition(BaseModel):
+    """An underwriting condition — doc request, clarification, escrow holdback, or repair."""
+    condition_type: Literal[
+        "doc_request", "clarification", "escrow_holdback", "repair_required"
+    ] = "doc_request"
+    severity: Literal[
+        "prior_to_submission", "prior_to_close", "funding"
+    ] = "prior_to_close"
+    description: str
+    lender_specific: str = ""   # lender_id or "all"
+    required: bool = True
+
+
+class RedFlag(BaseModel):
+    """A pre-underwriting red flag that will cause delay, re-trade, or decline."""
+    flag_type: Literal[
+        "fico_below_min", "ltv_above_max", "property_ineligible",
+        "dscr_too_low", "reserves_short", "cashflow_negative",
+    ]
+    severity: Literal["deal_killer", "significant", "minor"]
+    description: str
+    mitigation_suggestion: str = ""
+
+
+class PreUnderwritingReportSchema(BaseModel):
+    """Pydantic schema for API request/response validation of pre-UW reports."""
+    application_id: str
+    summary: str
+    overall_status: Literal["clean", "conditional", "decline_risk"]
+    lender_fit: list[dict[str, Any]] = []
+    conditions: list[Condition] = []
+    red_flags: list[RedFlag] = []
+    computed_metrics: dict[str, Any] = {}
+    suggested_lender: str = ""
+    credit_memo_draft: str = ""
+    generated_at: str

@@ -10,16 +10,17 @@ The 10-agent lineup below represents the full deal-flow automation stack for a r
 
 | # | Agent | Status |
 |---|-------|--------|
-| 1 | **AI Loan Officer** | ✅ scaffolded |
-| 2 | **Transaction Coordinator** | ✅ scaffolded |
-| 3 | Title & Escrow Coordinator | ROADMAP |
-| 4 | Inspection Coordinator | ROADMAP |
-| 5 | Property Manager Sourcer | ROADMAP |
-| 6 | Listing Agent Liaison | ROADMAP |
-| 7 | Cash Buyer Recruiter | ROADMAP |
-| 8 | Insurance Quote Bot | ROADMAP |
-| 9 | Tax / 1031 Advisor | ROADMAP |
-| 10 | Capital Raiser | ROADMAP |
+| 1 | **AI Loan Officer (Alex)** | ✅ scaffolded + Arive/Zapier wired |
+| 2 | **Transaction Coordinator (Sam)** | ✅ scaffolded |
+| 3 | **Loan Processor (Casey)** | ✅ scaffolded |
+| 4 | Title & Escrow Coordinator | ROADMAP |
+| 5 | Inspection Coordinator | ROADMAP |
+| 6 | Property Manager Sourcer | ROADMAP |
+| 7 | Listing Agent Liaison | ROADMAP |
+| 8 | Cash Buyer Recruiter | ROADMAP |
+| 9 | Insurance Quote Bot | ROADMAP |
+| 10 | Tax / 1031 Advisor | ROADMAP |
+| 11 | Capital Raiser | ROADMAP |
 
 ---
 
@@ -58,9 +59,13 @@ Set `ANTHROPIC_API_KEY` in `.env` to enable the `/chat` endpoints.
 ```
 Tranchi Web App (Express + tRPC + React)
   └─► tranchi-deal-flow-agents (this repo, :5010)
-        ├── AI Loan Officer    /api/loan/*
+        ├── AI Loan Officer (Alex)   /api/loan/*
+        │     ├─► Loan Processor (Casey) /api/processor/* (internal)
+        │     │     └─► lender_guidelines/ (9 lenders, guidelines_index.json)
+        │     ├─► Zapier webhooks → Arive LOS (outbound events)
+        │     ├─► POST /api/loan/webhook/arive-update (inbound from Arive)
         │     └─► Lender Partners (Lima One, Kiavi, New Silver, LendingOne, Roc, Anchor)
-        └── TX Coordinator     /api/tx/*
+        └── TX Coordinator (Sam)     /api/tx/*
               └─► tranchi-outbound-agent (Hope voice / iMessage)
                     └─► Title, Inspector, Insurance via outbound comms
 
@@ -89,19 +94,30 @@ See `ops/deploy_render.md` for full Render deployment steps and env var checklis
 ## Repo Structure
 
 ```
-app.py                      # Flask entry point — registers both blueprints
+app.py                      # Flask entry point — registers all blueprints
 shared/                     # Auth, DB, LLM, webhooks, Pydantic schemas
-  migrations/001_initial.sql  # All tables (SQLite + MySQL compatible)
-loan_officer/               # AI Loan Officer (blueprint: /api/loan/*)
+  migrations/001_initial.sql       # Base tables (loan officer + TX coordinator)
+  migrations/002_loan_processor.sql # Loan processor tables
+loan_officer/               # AI Loan Officer Alex (blueprint: /api/loan/*)
+  arive_zapier.py           # Arive/Zapier two-way integration
   system_prompt.md          # Alex's full persona and rules
   workflows.py              # State machine: NEW → ... → FUNDED
   lender_router.py          # Product scoring + lender matching
   prequal.py                # DSCR/LTV/fit-score computation
   lender_partners.py        # 6 lender partner configs
   document_collector.py     # Required docs per product
-  routes.py                 # 8 Flask endpoints
+  routes.py                 # 9 Flask endpoints (incl. arive-update webhook)
   tests/test_workflow.py    # State machine + prequal + router tests
-tx_coordinator/             # Transaction Coordinator (blueprint: /api/tx/*)
+  tests/test_arive_zapier.py# Arive/Zapier integration tests
+loan_processor/             # AI Loan Processor Casey (blueprint: /api/processor/*)
+  system_prompt.md          # Casey's persona + job + guardrails
+  pre_underwriting.py       # Core pre-UW engine + PreUnderwritingReport
+  guideline_engine.py       # Loads + queries lender_guidelines/
+  condition_generator.py    # Generates condition lists per product + lender
+  credit_memo.py            # Drafts LLM-powered credit memos
+  routes.py                 # 6 Flask endpoints
+  tests/test_pre_underwriting.py
+tx_coordinator/             # Transaction Coordinator Sam (blueprint: /api/tx/*)
   system_prompt.md          # Sam's persona and escalation rules
   timeline.py               # 16-milestone timeline generator
   deadline_engine.py        # Contingency deadline tracking + alerting
@@ -110,8 +126,19 @@ tx_coordinator/             # Transaction Coordinator (blueprint: /api/tx/*)
   communication_hub.py      # All comms across parties
   routes.py                 # 8 Flask endpoints
   tests/test_timeline.py    # Timeline + deadline engine tests
+lender_guidelines/          # Lender guidelines (9 products across 6 lenders)
+  guidelines_index.json     # Machine-readable matrix for fast lookup
+  lima_one_dscr.md          # Lima One DSCR guidelines
+  lima_one_fix_flip.md
+  kiavi_dscr.md
+  kiavi_brrrr.md
+  new_silver_fix_flip.md
+  lendingone_dscr.md
+  roc_capital_dscr.md
+  roc_capital_brrrr.md
+  anchor_loans_fix_flip.md
 ops/
-  seed_data.py              # Sample borrower + property + transaction
+  seed_data.py              # Sample borrower + property + transaction + pre-UW report
   run_local.sh              # One-command local dev boot
   deploy_render.md          # Render deployment guide
 ```

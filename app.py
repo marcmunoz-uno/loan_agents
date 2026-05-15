@@ -19,6 +19,7 @@ load_dotenv()
 from shared.db import init_db
 from loan_officer.routes import loan_bp
 from tx_coordinator.routes import tx_bp
+from loan_processor.routes import processor_bp
 
 
 def create_app() -> Flask:
@@ -33,6 +34,7 @@ def create_app() -> Flask:
     # Register blueprints
     app.register_blueprint(loan_bp)
     app.register_blueprint(tx_bp)
+    app.register_blueprint(processor_bp)
 
     # ── Health check ──────────────────────────────────────────────────────────
 
@@ -41,7 +43,7 @@ def create_app() -> Flask:
         return jsonify({
             "status": "ok",
             "service": "tranchi-deal-flow-agents",
-            "agents": ["loan_officer", "tx_coordinator"],
+            "agents": ["loan_officer", "tx_coordinator", "loan_processor"],
             "ts": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -51,13 +53,19 @@ def create_app() -> Flask:
     def root():
         return jsonify({
             "service": "tranchi-deal-flow-agents",
-            "description": "AI Loan Officer + Transaction Coordinator for Tranchi.ai",
+            "description": "AI Loan Officer + Loan Processor + Transaction Coordinator for Tranchi.ai",
             "endpoints": {
                 "health": "GET /health",
                 "loan_officer": {
                     "prequal": "POST /api/loan/prequal",
                     "application": "POST /api/loan/application",
                     "chat": "POST /api/loan/chat",
+                    "arive_webhook": "POST /api/loan/webhook/arive-update",
+                },
+                "loan_processor": {
+                    "pre_underwrite": "POST /api/processor/pre-underwrite/<app_id>",
+                    "guidelines": "GET /api/processor/guidelines",
+                    "chat": "POST /api/processor/chat",
                 },
                 "tx_coordinator": {
                     "open": "POST /api/tx/open",
@@ -65,7 +73,7 @@ def create_app() -> Flask:
                     "chat": "POST /api/tx/<tx_id>/chat",
                 },
             },
-            "docs": "See loan_officer/README.md and tx_coordinator/README.md",
+            "docs": "See loan_officer/README.md, loan_processor/README.md, and tx_coordinator/README.md",
         })
 
     return app

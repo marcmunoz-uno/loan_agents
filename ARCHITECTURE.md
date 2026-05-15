@@ -8,44 +8,102 @@
 │              (Express + tRPC + React, MySQL, 37 tables)             │
 │   users | investor_profiles | placed_offers | cash_buyers | deals   │
 └──────────────┬──────────────────────────────────────────────────────┘
-               │ POST /api/loan/*  POST /api/tx/*
+               │ POST /api/loan/*  POST /api/processor/*  POST /api/tx/*
                │ Authorization: Bearer TRANCHI_API_SECRET
                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │             tranchi-deal-flow-agents (this repo)                     │
 │                        Flask · :5010                                 │
-│  ┌──────────────────────────┐  ┌──────────────────────────────────┐ │
-│  │    AI Loan Officer       │  │    Transaction Coordinator       │ │
-│  │    /api/loan/*           │  │    /api/tx/*                     │ │
-│  │                          │  │                                  │ │
-│  │  prequal → routing →     │  │  PSA → timeline → milestones →   │ │
-│  │  application → docs →    │  │  deadlines → parties → comms →  │ │
-│  │  underwriting → funded   │  │  closing day                     │ │
-│  └──────────┬───────────────┘  └──────────────┬───────────────────┘ │
-│             │                                  │                     │
-│  ┌──────────▼──────────────────────────────────▼───────────────────┐│
-│  │                      shared/                                     ││
-│  │  db.py · llm.py · auth.py · webhooks.py · schemas.py            ││
-│  │  tranchi_client.py · migrations/001_initial.sql                  ││
-│  └─────────────────────────────────────────────────────────────────┘│
-└──────┬───────────────────────────────────────────┬──────────────────┘
-       │                                           │
-       │ Lender Partner APIs                       │ tranchi-outbound-agent
-       │ (HTTP POST application)                   │ (iMessage / voice)
-       ▼                                           ▼
-┌──────────────────┐   ┌────────────┐   ┌────────────────────────────┐
-│  Lima One Capital│   │   Kiavi    │   │  tranchi-outbound-agent     │
-│  Roc Capital     │   │ New Silver │   │  POST /api/outreach/nurture │
-│  LendingOne      │   │ Anchor     │   │  POST /api/outreach/call    │
-└──────────────────┘   └────────────┘   └────────────────────────────┘
-                                                    │
-                                          ┌─────────▼──────────┐
-                                          │ ElevenLabs / Blooio│
-                                          │ (voice + iMessage) │
-                                          └────────────────────┘
+│  ┌────────────────────┐  ┌──────────────────┐  ┌─────────────────┐ │
+│  │  AI Loan Officer   │  │  Loan Processor  │  │ TX Coordinator  │ │
+│  │  (Alex)            │  │  (Casey)         │  │ (Sam)           │ │
+│  │  /api/loan/*       │  │  /api/processor/*│  │ /api/tx/*       │ │
+│  │                    │  │                  │  │                 │ │
+│  │  prequal →         │◄─┤  pre_underwrite()│  │ PSA → timeline  │ │
+│  │  application →     │  │  guideline_engine│  │ milestones →    │ │
+│  │  docs → route →    │─►│  condition_gen() │  │ deadlines →     │ │
+│  │  underwriting →    │  │  credit_memo()   │  │ parties →       │ │
+│  │  funded            │  │  lender_fit rank │  │ closing day     │ │
+│  └────────┬───────────┘  └────────┬─────────┘  └────────┬────────┘ │
+│           │                       │                      │          │
+│  ┌────────▼───────────────────────▼──────────────────────▼────────┐ │
+│  │                         shared/                                 │ │
+│  │  db.py · llm.py · auth.py · webhooks.py · schemas.py           │ │
+│  │  migrations/001_initial.sql + 002_loan_processor.sql            │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+└──────┬──────────────────────────┬──────────────────┬────────────────┘
+       │                          │                  │
+       │ Zapier webhooks          │ lender_guidelines│ tranchi-outbound-agent
+       │ (outbound events)        │ (9 markdown docs │ (iMessage / voice)
+       ▼                          │  + index.json)   ▼
+┌─────────────────┐              └──────────────►  ┌──────────────────────┐
+│  Zapier         │                                 │  tranchi-outbound-   │
+│  prequal_created│                                 │  agent               │
+│  app_submitted  │◄── Arive fires inbound webhook  │  POST /outreach/call │
+│  docs_uploaded  │    POST /webhook/arive-update   │  POST /outreach/sms  │
+│  ready_for_uw   │                                 └──────────────────────┘
+│  lender_routed  │
+│  approved       │
+│  declined       │
+│  funded         │
+└────────┬────────┘
+         │ Zapier action
+         ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Arive LOS                                     │
+│  Creates / updates loan records, sends disclosures, tracks pipeline  │
+│  Fires webhooks on status change → Zapier → our /webhook/arive-update│
+└─────────────────────────────────────────────────────────────────────┘
 
 County Portal Scraper ──────────────────────────────────────────────►
   tranchi_mcp_server.py (9 tools)   →  property data feeds into prequal
+```
+
+---
+
+## Sequence: Alex → Casey → Arive (New)
+
+```
+Borrower / Web App          Alex (Loan Officer)      Casey (Processor)         Arive LOS
+     │                            │                        │                       │
+     │  POST /api/loan/prequal    │                        │                       │
+     │──────────────────────────► │                        │                       │
+     │                            │ score_prequal()         │                       │
+     │                            │ fire_zap(prequal_created)──────────────────────►│
+     │  {prequal_id, score}       │                        │                       │ lead created
+     │◄──────────────────────────│                        │                       │
+     │                            │                        │                       │
+     │  POST /api/loan/application│                        │                       │
+     │──────────────────────────► │                        │                       │
+     │                            │ fire_zap(app_submitted)────────────────────────►│
+     │                            │                        │                       │ app updated
+     │  POST .../documents        │                        │                       │
+     │──────────────────────────► │                        │                       │
+     │                            │ fire_zap(docs_uploaded)────────────────────────►│
+     │                            │                        │                       │
+     │  POST /api/processor/pre-underwrite/<id>            │                       │
+     │──────────────────────────────────────────────────► │                       │
+     │                            │           pre_underwrite()                      │
+     │                            │           guideline_engine.match_lenders()      │
+     │                            │           condition_generator.generate()        │
+     │                            │           credit_memo.draft()  (LLM)           │
+     │                            │                        │                       │
+     │  overall_status = "clean"  │           if clean:    │                       │
+     │                            │           fire_zap(ready_for_underwriting)─────►│
+     │  {report, conditions,      │                        │                       │ status →
+     │   credit_memo, lender_fit} │                        │                       │ "Ready for
+     │◄──────────────────────────────────────────────────│                       │  Submission"
+     │                            │                        │                       │
+     │  POST .../route            │                        │                       │
+     │──────────────────────────► │                        │                       │
+     │                            │ fire_zap(lender_routed)────────────────────────►│
+     │                            │                        │                       │
+     │          [Arive UW decision — status change fires Zapier trigger]
+     │                            │  POST /api/loan/webhook/arive-update            │
+     │                            │◄─────────────────────────────────────────────── │
+     │                            │ update state (CLOSING / APPROVED / DECLINED)    │
+     │  status notification       │                        │                       │
+     │◄──────────────────────────│                        │                       │
 ```
 
 ---

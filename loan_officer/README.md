@@ -146,6 +146,103 @@ curl -X POST http://localhost:5010/api/loan/chat \
 
 ---
 
+## Arive Integration via Zapier
+
+Arive is Tranchi's LOS (Loan Origination System). Arive has no public API — all automation goes through Zapier webhooks.
+
+### Two-way integration pattern
+
+```
+Outbound (us → Zapier → Arive):
+  Our event fires → POST to Zapier webhook URL → Zapier action: Create/Update in Arive
+
+Inbound (Arive → Zapier → us):
+  Arive status changes → Zapier trigger: Arive status change → POST to /api/loan/webhook/arive-update
+```
+
+### Outbound Zaps to create (one per event type)
+
+| Event | Zapier Trigger | Arive Action | Env Var |
+|---|---|---|---|
+| `prequal_created` | Webhooks by Zapier — Catch Hook | Create Lead in Arive | `ZAPIER_HOOK_PREQUAL_CREATED` |
+| `application_submitted` | Webhooks by Zapier — Catch Hook | Create Application in Arive | `ZAPIER_HOOK_APPLICATION_SUBMITTED` |
+| `documents_uploaded` | Webhooks by Zapier — Catch Hook | Update Application — mark docs received | `ZAPIER_HOOK_DOCUMENTS_UPLOADED` |
+| `ready_for_underwriting` | Webhooks by Zapier — Catch Hook | Update Application status → "Ready for Submission" + attach credit memo | `ZAPIER_HOOK_READY_FOR_UNDERWRITING` |
+| `lender_routed` | Webhooks by Zapier — Catch Hook | Update Application — set lender partner | `ZAPIER_HOOK_LENDER_ROUTED` |
+
+For each Zap:
+1. In Zapier, create a new Zap
+2. Trigger: "Webhooks by Zapier" → "Catch Hook" → copy the webhook URL
+3. Paste the URL in `.env` as the appropriate `ZAPIER_HOOK_*` variable
+4. Action: Connect your Arive account → select "Create Record" or "Update Record"
+5. Map fields: `loan_amount`, `borrower_first_name`, `borrower_last_name`, `borrower_email`, etc. (all present in payload)
+6. Test + turn on the Zap
+
+### Inbound Zap (Arive → us)
+
+1. Create a new Zap
+2. Trigger: "Arive" → "New Status Change" (or whatever Arive exposes as webhook trigger)
+3. Action: "Webhooks by Zapier" → "POST" → URL: `https://your-deploy-url.com/api/loan/webhook/arive-update`
+4. Set headers: `Content-Type: application/json`
+5. Map body fields:
+   - `correlation_id` → Arive application's external reference / our app ID
+   - `status` → Arive's status string (e.g. "Cleared to Close")
+   - `conditions` → (optional) list of UW conditions
+   - `notes` → underwriter notes
+
+### HMAC signature
+
+Set `ARIVE_WEBHOOK_SECRET` in `.env` and configure the same value in Arive's webhook settings. All inbound webhooks must include `X-Arive-Signature: <HMAC-SHA256-hex>` in the header. The HMAC is computed over the raw request body using the shared secret.
+
+If `ARIVE_WEBHOOK_SECRET` is empty (dev mode), signature verification is skipped.
+
+### Arive status vocabulary mapping
+
+| Arive Status | Our Internal State |
+|---|---|
+| Initial Disclosures Sent | APP_SUBMITTED |
+| Submitted to Underwriting | UNDERWRITING |
+| Conditional Approval | CONDITIONS |
+| Cleared to Close | CLOSING |
+| Funded | FUNDED |
+| Approved | APPROVED |
+| Declined | DECLINED |
+
+### Field payload format
+
+Every outbound webhook carries these fields:
+
+```json
+{
+  "loan_amount": 71250,
+  "purchase_price": 95000,
+  "down_payment": 23750,
+  "down_payment_pct": 25.0,
+  "loan_purpose": "purchase",
+  "loan_product": "DSCR",
+  "property_address": "4521 Oak Ln",
+  "property_city": "Detroit",
+  "property_state": "MI",
+  "property_zip": "48224",
+  "subject_property_type": "single_family",
+  "borrower_first_name": "Marc",
+  "borrower_last_name": "Munoz",
+  "borrower_email": "marc@munoz.ltd",
+  "borrower_phone": "+13135550100",
+  "borrower_fico_estimate": 740,
+  "estimated_monthly_rent": 1200,
+  "estimated_dscr": 1.18,
+  "mlo_assignment": "round_robin",
+  "intake_source": "tranchi.ai",
+  "correlation_id": "app_abc123",
+  "event_type": "prequal_created",
+  "sent_at": "2026-05-15T12:00:00Z",
+  "source": "tranchi.ai"
+}
+```
+
+---
+
 ## State Machine
 
 ```

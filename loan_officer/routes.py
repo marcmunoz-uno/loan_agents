@@ -27,6 +27,9 @@ from loan_officer.workflows import (
     transition, add_audit_event, parse_audit_log, state_summary
 )
 from loan_officer.lender_partners import get_lender
+from loan_officer.arive_zapier import (
+    fire_zap, to_arive_format, ARIVE_STATUS_MAP,
+)
 
 loan_bp = Blueprint("loan", __name__, url_prefix="/api/loan")
 
@@ -119,6 +122,10 @@ def create_prequal():
     }
     with get_conn() as conn:
         insert(conn, "loan_prequals", row)
+
+    # ── Arive / Zapier outbound ────────────────────────────────────────────────
+    arive_payload = to_arive_format(row, correlation_id=prequal_id)
+    fire_zap("prequal_created", arive_payload, correlation_id=prequal_id)
 
     return jsonify({
         "prequal_id": prequal_id,
@@ -216,6 +223,18 @@ def create_application():
     with get_conn() as conn:
         insert(conn, "loan_applications", row)
 
+    # ── Arive / Zapier outbound ────────────────────────────────────────────────
+    # Merge prequal data so to_arive_format has borrower+property context
+    app_arive_row = {
+        **row,
+        "borrower_data": prequal["borrower_data"],
+        "property_data": prequal["property_data"],
+        "suggested_product": product,
+        "dscr": prequal.get("dscr"),
+        "monthly_payment_estimate": prequal.get("monthly_payment_estimate", 0),
+    }
+    fire_zap("application_submitted", to_arive_format(app_arive_row, correlation_id=app_id), correlation_id=app_id)
+
     return jsonify({
         "application_id": app_id,
         "prequal_id": req.prequal_id,
@@ -293,6 +312,26 @@ def upload_documents(app_id: str):
                    "updated_at": now,
                },
                "id = ?", (app_id,))
+
+    # ── Arive / Zapier outbound ────────────────────────────────────────────────
+    if docs_complete(product, docs_received):
+        with get_conn() as conn:
+            _prequal_for_docs = fetchone(conn, "SELECT * FROM loan_prequals WHERE id = ?",
+                                         (app["prequal_id"],))
+        if _prequal_for_docs:
+            docs_arive_row = {
+                **app,
+                "id": app_id,
+                "borrower_data": _prequal_for_docs["borrower_data"],
+                "property_data": _prequal_for_docs["property_data"],
+                "suggested_product": product,
+                "dscr": _prequal_for_docs.get("dscr"),
+                "monthly_payment_estimate": _prequal_for_docs.get("monthly_payment_estimate", 0),
+            }
+            fire_zap("documents_uploaded",
+                     {**to_arive_format(docs_arive_row, correlation_id=app_id),
+                      "docs_received": docs_received},
+                     correlation_id=app_id)
 
     return jsonify({
         "application_id": app_id,
@@ -407,6 +446,24 @@ def route_to_lender(app_id: str):
                },
                "id = ?", (app_id,))
 
+    # ── Arive / Zapier outbound ────────────────────────────────────────────────
+    if prequal:
+        route_arive_row = {
+            **app,
+            "id": app_id,
+            "borrower_data": prequal["borrower_data"],
+            "property_data": prequal["property_data"],
+            "suggested_product": product,
+            "dscr": prequal.get("dscr"),
+            "monthly_payment_estimate": prequal.get("monthly_payment_estimate", 0),
+        }
+        fire_zap("lender_routed",
+                 {**to_arive_format(route_arive_row, correlation_id=app_id),
+                  "lender": lender["name"],
+                  "lender_slug": lender_slug,
+                  "lender_ref_id": lender_ref_id},
+                 correlation_id=app_id)
+
     return jsonify({
         "application_id": app_id,
         "lender": lender["name"],
@@ -485,6 +542,103 @@ def lender_webhook():
     print(f"[lender_webhook] Application {app['id']} → {new_status} from lender ref {lender_ref_id}")
 
     return jsonify({"received": True, "application_id": app["id"], "new_status": new_status})
+
+
+# ── POST /api/loan/webhook/arive-update ──────────────────────────────────────
+
+@loan_bp.route("/webhook/arive-update", methods=["POST"])
+@verify_webhook(secret_env="ARIVE_WEBHOOK_SECRET", header_name="X-Arive-Signature")
+def arive_webhook():
+    """
+    Arive LOS pushes status updates via Zapier to this endpoint.
+
+    Expected body:
+    {
+        "correlation_id": "app_abc123...",   # our application ID or hash
+        "event_type": "status_change",       # Arive event type
+        "status": "Cleared to Close",        # Arive status vocabulary
+        "conditions": ["appraisal required", "..."],
+        "notes": "UW approved with conditions."
+    }
+
+    We map Arive's status vocabulary to our internal state machine.
+    When Arive is the source of truth (approved/declined/funded), we do NOT
+    fire an outbound Zapier event back — that would create a loop.
+    """
+    body = request.get_json(force=True) or {}
+    correlation_id = body.get("correlation_id", "")
+    arive_status = body.get("status", "")
+    conditions = body.get("conditions", [])
+    notes = body.get("notes", "")
+
+    if not correlation_id:
+        return jsonify({"error": "correlation_id required"}), 400
+
+    # Map Arive status to our state
+    new_state = ARIVE_STATUS_MAP.get(arive_status, "")
+    if not new_state:
+        print(f"[arive_webhook] Unmapped Arive status '{arive_status}' — storing as note only")
+
+    now = _now()
+
+    # Look up application by correlation_id (we use app_id as correlation_id)
+    with get_conn() as conn:
+        app = fetchone(conn, "SELECT * FROM loan_applications WHERE id = ?", (correlation_id,))
+        if not app:
+            # Try lender_ref_id fallback (in case Arive passes their internal ID)
+            app = fetchone(conn, "SELECT * FROM loan_applications WHERE lender_ref_id = ?",
+                           (correlation_id,))
+        if not app:
+            return jsonify({
+                "error": f"No application found for correlation_id {correlation_id}"
+            }), 404
+
+        app_id = app["id"]
+        audit_log = parse_audit_log(app["audit_log"])
+
+        updates: dict = {"updated_at": now}
+
+        if new_state and new_state != app["current_state"]:
+            try:
+                _, audit_log = transition(
+                    app["current_state"], new_state, audit_log,
+                    actor="arive_webhook",
+                    payload={"arive_status": arive_status, "correlation_id": correlation_id},
+                )
+                updates["current_state"] = new_state
+                updates["status"] = new_state
+            except ValueError as exc:
+                # Log but don't fail — Arive may send statuses out of our expected order
+                print(f"[arive_webhook] State transition error (continuing): {exc}")
+                audit_log = add_audit_event(audit_log, "arive_status_note",
+                                            {"arive_status": arive_status, "error": str(exc)})
+        else:
+            audit_log = add_audit_event(audit_log, "arive_status_received",
+                                        {"arive_status": arive_status,
+                                         "correlation_id": correlation_id})
+
+        if conditions:
+            updates["conditions"] = json.dumps(conditions)
+        if notes:
+            updates["underwriter_notes"] = notes
+        updates["audit_log"] = json.dumps(audit_log)
+
+        update(conn, "loan_applications", updates, "id = ?", (app_id,))
+
+        conn.execute(
+            "INSERT INTO loan_audit_log (application_id, event_type, payload, created_at) VALUES (?, ?, ?, ?)",
+            (app_id, "arive_status_update", json.dumps(body), now)
+        )
+        conn.commit()
+
+    print(f"[arive_webhook] Application {app_id} Arive status='{arive_status}' → internal state='{new_state or 'unchanged'}'")
+
+    return jsonify({
+        "received": True,
+        "application_id": app_id,
+        "arive_status": arive_status,
+        "internal_state": new_state or app["current_state"],
+    })
 
 
 # ── POST /api/loan/chat ───────────────────────────────────────────────────────
