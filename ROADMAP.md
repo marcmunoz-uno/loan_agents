@@ -102,14 +102,14 @@
 
 ---
 
-## Agent 10: Capital Raiser
-**Priority:** 8 (last — highest complexity + regulatory risk)
-**Gap:** No syndication or co-investor flow on Tranchi despite "raise capital" being implied by the platform.
-**What it does:** Helps investors structure a Reg D 506(b) or 506(c) offering for a specific deal, tracks accredited investor relationships, generates investor dashboards (deal returns, distributions, waterfall), handles co-investor communication throughout the deal lifecycle.
-**Complexity:** L (and high regulatory risk)
-**Integrations:** SEC EDGAR for Reg D filings, DocuSign for subscription agreements, Plaid for distribution/ACH, investor CRM
-**Why:** Syndication is the path from 1-deal-at-a-time to 10x scale for most investors.
-**Risk:** High. Reg D compliance requires securities counsel review of any investor-facing materials. Build the data model only; no investor-facing copy without legal review.
+## Agent 10: Working Capital
+**Priority:** 8
+**Gap:** No flow on Tranchi for the short-term capital real estate investors actually need between deals — down payments, rehab budgets, earnest money, gap funding.
+**What it does:** Rate-shops short-term working capital across personal loans (SoFi, LightStream, Marcus, Upstart, Discover, Best Egg, Upgrade), business lines of credit (Bluevine, OnDeck, Fundbox), HELOCs, 0% intro APR personal/business cards, and Solo-401k/SDIRA loans. Surfaces the apples-to-apples all-in cost (APR + origination fees + term) and walks the investor through the lender's application — without ever typing SSN on their behalf.
+**Complexity:** M
+**Integrations:** Lender brokers via email (Zapier MCP — Gmail), rate log via Zapier MCP (Google Sheets), co-pilot UX in the Tranchi web app for the SSN-handoff step. Long-term: rate-aggregator APIs (Even, Plaid Loans).
+**Why:** Working capital is the #1 friction point between investor deals — they have a good deal, just not the cash this week. A bot that rate-shops in 60 seconds and hands them a ranked shortlist solves a real problem without taking on regulatory risk.
+**Risk:** Moderate. State licensing for loan brokerage varies; the bot rate-shops and educates but never submits applications — the investor types SSN and clicks submit themselves. APRs above 36% are refused; payday / title-loan / MCA products are never recommended.
 
 ---
 
