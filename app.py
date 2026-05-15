@@ -1,9 +1,11 @@
 """
 app.py — Flask entry point for tranchi-deal-flow-agents.
 
-Registers two blueprints:
-  - loan_officer  → /api/loan/*
-  - tx_coordinator → /api/tx/*
+Registers four blueprints:
+  - loan_officer    → /api/loan/*
+  - tx_coordinator  → /api/tx/*
+  - loan_processor  → /api/processor/*
+  - orchestrator    → /api/chat/*   (unified consumer chat front-door)
 
 Deploy: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
 Local:  PORT=5010 python app.py
@@ -20,6 +22,7 @@ from shared.db import init_db
 from loan_officer.routes import loan_bp
 from tx_coordinator.routes import tx_bp
 from loan_processor.routes import processor_bp
+from orchestrator.routes import chat_bp
 
 
 def create_app() -> Flask:
@@ -35,6 +38,7 @@ def create_app() -> Flask:
     app.register_blueprint(loan_bp)
     app.register_blueprint(tx_bp)
     app.register_blueprint(processor_bp)
+    app.register_blueprint(chat_bp)
 
     # ── Health check ──────────────────────────────────────────────────────────
 
@@ -44,6 +48,11 @@ def create_app() -> Flask:
             "status": "ok",
             "service": "tranchi-deal-flow-agents",
             "agents": ["loan_officer", "tx_coordinator", "loan_processor"],
+            "personas": [
+                "Tranchi - Loan Officer",
+                "Tranchi - Loan Processor",
+                "Tranchi - Transaction Coordinator",
+            ],
             "ts": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -71,6 +80,10 @@ def create_app() -> Flask:
                     "open": "POST /api/tx/open",
                     "status": "GET /api/tx/<tx_id>",
                     "chat": "POST /api/tx/<tx_id>/chat",
+                },
+                "orchestrator": {
+                    "turn": "POST /api/chat/turn",
+                    "personas": "GET /api/chat/personas",
                 },
             },
             "docs": "See loan_officer/README.md, loan_processor/README.md, and tx_coordinator/README.md",
