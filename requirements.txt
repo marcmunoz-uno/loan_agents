@@ -5,3 +5,4 @@ openai==1.58.1
 requests==2.32.3
 pydantic==2.10.3
 python-dotenv==1.0.1
+mcp>=1.0.0
