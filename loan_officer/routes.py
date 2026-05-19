@@ -9,7 +9,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 
 from shared.auth import require_tranchi_auth
 from shared.db import get_conn, insert, update, fetchone, fetchall
@@ -737,6 +737,47 @@ def generate_prequal_letter(prequal_id: str):
         "pdf_url_expires_at": result.pdf_url_expires_at,
         "breakdown":          result.breakdown,
     })
+
+
+# ── GET /api/loan/prequal-letter/<letter_id>/pdf ──────────────────────────────
+
+@loan_bp.route("/prequal-letter/<letter_id>/pdf", methods=["GET"])
+def get_prequal_letter_pdf(letter_id: str):
+    """
+    Public, HMAC-tokenized endpoint that re-renders the letter PDF from its
+    audit row. Used by Zapier (and the borrower's email client) as the
+    attachment source — no Bearer auth, but the URL must carry a valid
+    `token` + `exp` pair signed with TRANCHI_API_SECRET.
+
+    Returns application/pdf bytes on success; 403 on bad/expired token; 404
+    if the letter_id doesn't exist.
+    """
+    from loan_officer.prequal_letter import (
+        verify_letter_pdf_token,
+        regenerate_pdf_from_audit_row,
+    )
+
+    token = request.args.get("token", "")
+    try:
+        exp = int(request.args.get("exp", "0"))
+    except ValueError:
+        return jsonify({"error": "exp must be an integer unix timestamp"}), 400
+
+    if not verify_letter_pdf_token(letter_id, exp, token):
+        return jsonify({"error": "invalid or expired token"}), 403
+
+    pdf = regenerate_pdf_from_audit_row(letter_id)
+    if pdf is None:
+        return jsonify({"error": "letter not found"}), 404
+
+    return Response(
+        pdf,
+        mimetype="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="prequal_letter_{letter_id}.pdf"',
+            "Cache-Control": "private, max-age=600",
+        },
+    )
 
 
 # ── GET /api/loan/prequal-letter/<letter_id> ──────────────────────────────────

@@ -50,6 +50,8 @@ services:
         sync: false
       - key: ZAPIER_MCP_API_KEY
         sync: false
+      - key: PUBLIC_BASE_URL
+        value: https://loan-agents.onrender.com
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data

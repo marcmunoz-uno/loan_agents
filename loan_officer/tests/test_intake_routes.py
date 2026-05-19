@@ -235,6 +235,105 @@ def test_completeness_uses_classified_doc_type(app_client, auth_headers, stub_s3
     assert body["completion_pct"] < 100
 
 
+# ── Self-hosted PDF endpoint (/api/loan/prequal-letter/<id>/pdf) ──────────────
+
+def test_letter_pdf_endpoint_serves_pdf_with_valid_token(app_client, temp_db, stub_s3, monkeypatch):
+    from shared.db import get_conn, insert
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-secret")  # matches conftest auth fixture
+
+    now = "2026-05-19T00:00:00+00:00"
+    # FK requires loan_prequals.id to exist before we can insert into prequal_letters
+    with get_conn() as conn:
+        insert(conn, "loan_prequals", {
+            "id":                       "pq_x_letter",
+            "user_id":                  "usr_marc",
+            "borrower_data":            '{"name":"Test","email":"t@example.com"}',
+            "property_data":            '{}',
+            "score":                    0,
+            "suggested_product":        "dscr",
+            "dscr":                     1.0,
+            "ltv":                      0.7,
+            "monthly_payment_estimate": 0,
+            "strengths":                "[]", "concerns": "[]", "next_steps": "[]",
+            "status":                   "scored", "notes": "",
+            "created_at":               now, "updated_at": now,
+        })
+        insert(conn, "prequal_letters", {
+            "letter_id":          "pql_self_1",
+            "prequal_id":         "pq_x_letter",
+            "application_id":     "",
+            "borrower_name":      "Test Borrower",
+            "borrower_email":     "test@example.com",
+            "max_pp_low":         70000,
+            "max_pp_high":        85000,
+            "liquid_assets":      24000,
+            "monthly_rent_used":  900,
+            "rate_low_pct":       5.875,
+            "rate_high_pct":      8.0,
+            "down_pct_low":       20.0,
+            "issued_at":          now,
+            "expires_at":         now,
+            "zap_fired":          0,
+            "sent_to":            "",
+            "breakdown":          "{}",
+            "created_at":         now,
+        })
+
+    from loan_officer.prequal_letter import sign_letter_pdf_token
+    import time
+    exp = int(time.time()) + 3600
+    token = sign_letter_pdf_token("pql_self_1", exp)
+
+    resp = app_client.get(f"/api/loan/prequal-letter/pql_self_1/pdf?token={token}&exp={exp}")
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/pdf"
+    assert resp.data.startswith(b"%PDF-")
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+
+
+def test_letter_pdf_endpoint_rejects_bad_token(app_client, temp_db, monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-secret")
+    import time
+    exp = int(time.time()) + 3600
+    resp = app_client.get(f"/api/loan/prequal-letter/pql_x/pdf?token={'00' * 16}&exp={exp}")
+    assert resp.status_code == 403
+
+
+def test_letter_pdf_endpoint_rejects_expired_token(app_client, temp_db, monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-secret")
+    from loan_officer.prequal_letter import sign_letter_pdf_token
+    import time
+    exp = int(time.time()) - 1  # expired
+    token = sign_letter_pdf_token("pql_x", exp)
+    resp = app_client.get(f"/api/loan/prequal-letter/pql_x/pdf?token={token}&exp={exp}")
+    assert resp.status_code == 403
+
+
+def test_letter_pdf_endpoint_404_when_letter_missing(app_client, temp_db, monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-secret")
+    from loan_officer.prequal_letter import sign_letter_pdf_token
+    import time
+    exp = int(time.time()) + 3600
+    token = sign_letter_pdf_token("pql_missing", exp)
+    resp = app_client.get(f"/api/loan/prequal-letter/pql_missing/pdf?token={token}&exp={exp}")
+    assert resp.status_code == 404
+
+
+def test_letter_pdf_endpoint_does_not_require_bearer_auth(app_client, temp_db, monkeypatch):
+    """The /pdf endpoint is intentionally accessible without Authorization,
+    auth is via the URL-signed token. Anything pulling the URL (Zapier, Gmail
+    preview) can fetch it."""
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-secret")
+    from loan_officer.prequal_letter import sign_letter_pdf_token
+    import time
+    exp = int(time.time()) + 3600
+    token = sign_letter_pdf_token("pql_anon", exp)
+    # No Authorization header at all
+    resp = app_client.get(f"/api/loan/prequal-letter/pql_anon/pdf?token={token}&exp={exp}")
+    # 404 (letter doesn't exist) — confirms the route reached the body, not 401
+    assert resp.status_code == 404
+
+
 # ── Auto-fire prequal letter from /classify ───────────────────────────────────
 
 def _seed_prequal_and_app(app_id="app_autofire_1", prequal_id="pq_autofire_1"):

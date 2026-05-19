@@ -325,29 +325,35 @@ def test_generate_and_send_uploads_to_s3_when_configured(temp_db, stub_s3):
     assert kwargs["content_type"] == "application/pdf"
 
 
-def test_generate_and_send_no_s3_skips_upload(temp_db):
-    """When S3 is unconfigured, the letter still generates — just without a URL."""
+def test_generate_and_send_no_s3_falls_back_to_self_hosted_url(temp_db, monkeypatch):
+    """When S3 is unconfigured, the PDF URL falls back to the self-hosted /pdf endpoint."""
     from shared.s3_client import S3Client
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://loan-agents.test")
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-secret")
     bare = S3Client(bucket="")
     _seed_prequal("pq_no_s3")
     with patch("loan_officer.prequal_letter.get_default_client", return_value=bare), \
          patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
         letter = generate_and_send("pq_no_s3", skip_send=True)
 
-    assert letter.pdf_url == ""
-    assert letter.pdf_url_expires_at == ""
+    assert letter.pdf_url.startswith("https://loan-agents.test/api/loan/prequal-letter/")
+    assert "/pdf?token=" in letter.pdf_url
+    assert letter.pdf_url_expires_at != ""
 
 
-def test_generate_and_send_s3_upload_failure_does_not_block_letter(temp_db, stub_s3):
-    """If S3 upload throws, the letter still generates without a URL."""
+def test_generate_and_send_s3_upload_failure_falls_back_to_self_hosted(temp_db, stub_s3, monkeypatch):
+    """If S3 upload throws, the letter still generates and falls back to the self-hosted URL."""
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://loan-agents.test")
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-secret")
     stub_s3.put_object_bytes.side_effect = RuntimeError("S3 down")
     _seed_prequal("pq_s3_fail")
     with patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
          patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
         letter = generate_and_send("pq_s3_fail", skip_send=True)
 
-    assert letter.pdf_url == ""
-    assert letter.letter_id.startswith("pql_")  # letter still produced
+    assert letter.letter_id.startswith("pql_")
+    # Fell back to self-hosted URL
+    assert letter.pdf_url.startswith("https://loan-agents.test/api/loan/prequal-letter/")
 
 
 def test_generate_and_send_uses_mcp_when_configured(temp_db, stub_s3):
@@ -399,6 +405,80 @@ def test_generate_and_send_mcp_failure_falls_back_to_webhook(temp_db, stub_s3):
 
     assert letter.mcp_send_status.startswith("failed:")
     zap.assert_called_once()
+
+
+# ── HMAC + self-hosted PDF URL ────────────────────────────────────────────────
+
+def test_sign_and_verify_letter_pdf_token_roundtrip(monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-shared-secret")
+    import loan_officer.prequal_letter as pl
+    exp = int(__import__("time").time()) + 3600
+    tok = pl.sign_letter_pdf_token("pql_x", exp)
+    assert pl.verify_letter_pdf_token("pql_x", exp, tok)
+
+
+def test_verify_letter_pdf_token_rejects_tampered_id(monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-shared-secret")
+    import loan_officer.prequal_letter as pl
+    exp = int(__import__("time").time()) + 3600
+    tok = pl.sign_letter_pdf_token("pql_x", exp)
+    assert not pl.verify_letter_pdf_token("pql_other", exp, tok)
+
+
+def test_verify_letter_pdf_token_rejects_expired(monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-shared-secret")
+    import loan_officer.prequal_letter as pl
+    exp = int(__import__("time").time()) - 1  # 1s in the past
+    tok = pl.sign_letter_pdf_token("pql_x", exp)
+    assert not pl.verify_letter_pdf_token("pql_x", exp, tok)
+
+
+def test_verify_letter_pdf_token_rejects_wrong_token(monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-shared-secret")
+    import loan_officer.prequal_letter as pl
+    assert not pl.verify_letter_pdf_token("pql_x", 9999999999, "00" * 16)
+
+
+def test_build_self_hosted_pdf_url_carries_token_and_exp(monkeypatch):
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-shared-secret")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.test")
+    from loan_officer.prequal_letter import build_self_hosted_pdf_url
+    url = build_self_hosted_pdf_url("pql_y")
+    assert url.startswith("https://example.test/api/loan/prequal-letter/pql_y/pdf?")
+    assert "token=" in url and "exp=" in url
+
+
+def test_regenerate_pdf_from_audit_row(temp_db, stub_s3):
+    _seed_prequal("pq_regen")
+    with patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
+        letter = generate_and_send("pq_regen", skip_send=True)
+
+    from loan_officer.prequal_letter import regenerate_pdf_from_audit_row
+    pdf = regenerate_pdf_from_audit_row(letter.letter_id)
+    assert pdf is not None and pdf.startswith(b"%PDF-")
+
+
+def test_regenerate_pdf_unknown_letter_returns_none(temp_db):
+    from loan_officer.prequal_letter import regenerate_pdf_from_audit_row
+    assert regenerate_pdf_from_audit_row("pql_missing") is None
+
+
+def test_generate_and_send_falls_back_to_self_hosted_url_when_no_s3(temp_db, monkeypatch):
+    """When S3 is unconfigured, the PDF URL points at our own /pdf endpoint."""
+    from shared.s3_client import S3Client
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://loan-agents.test")
+    monkeypatch.setenv("TRANCHI_API_SECRET", "test-shared-secret")
+    bare = S3Client(bucket="")
+    _seed_prequal("pq_selfhost")
+    with patch("loan_officer.prequal_letter.get_default_client", return_value=bare), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
+        letter = generate_and_send("pq_selfhost", skip_send=True)
+
+    assert letter.pdf_url.startswith("https://loan-agents.test/api/loan/prequal-letter/")
+    assert "/pdf?token=" in letter.pdf_url
+    assert "&exp=" in letter.pdf_url
+    assert letter.pdf_url_expires_at != ""
 
 
 def test_pdf_url_persists_to_audit_row(temp_db, stub_s3):

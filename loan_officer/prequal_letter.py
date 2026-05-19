@@ -30,12 +30,53 @@ from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from typing import Any, Optional
 
+import hashlib
+import hmac
+import time
+
 from shared.db import get_conn, fetchone, fetchall, insert
 from shared.s3_client import S3NotConfigured, get_default_client
 from shared.zapier_mcp import ZapierMCPClient
 from loan_officer.arive_zapier import fire_zap
 
-PDF_URL_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days
+PDF_URL_TTL_SECONDS = 60 * 60 * 24 * 7   # 7 days (S3 presigned URLs)
+SELF_HOSTED_PDF_TTL_SECONDS = 60 * 60 * 24 * 14  # 14 days (self-hosted endpoint)
+
+
+def _public_base_url() -> str:
+    """Best-effort: env var, then Render's auto-injected URL, then a localhost default."""
+    return (
+        os.environ.get("PUBLIC_BASE_URL")
+        or os.environ.get("RENDER_EXTERNAL_URL")
+        or "http://localhost:5010"
+    ).rstrip("/")
+
+
+def _api_secret() -> bytes:
+    return os.environ.get("TRANCHI_API_SECRET", "dev-secret-change-me").encode()
+
+
+def sign_letter_pdf_token(letter_id: str, expires_at_unix: int) -> str:
+    """HMAC-SHA256 of (letter_id|exp) truncated to 32 hex chars."""
+    msg = f"{letter_id}|{expires_at_unix}".encode()
+    return hmac.new(_api_secret(), msg, hashlib.sha256).hexdigest()[:32]
+
+
+def verify_letter_pdf_token(letter_id: str, expires_at_unix: int, token: str) -> bool:
+    """Constant-time HMAC + freshness check."""
+    if not letter_id or not token:
+        return False
+    expected = sign_letter_pdf_token(letter_id, expires_at_unix)
+    if not hmac.compare_digest(expected, token):
+        return False
+    return int(time.time()) < expires_at_unix
+
+
+def build_self_hosted_pdf_url(letter_id: str, ttl_seconds: int = SELF_HOSTED_PDF_TTL_SECONDS) -> str:
+    """Construct a tokenized public URL pointing at our own /pdf endpoint."""
+    exp = int(time.time()) + ttl_seconds
+    token = sign_letter_pdf_token(letter_id, exp)
+    return f"{_public_base_url()}/api/loan/prequal-letter/{letter_id}/pdf?token={token}&exp={exp}"
 
 
 # ── Underwriting params ──────────────────────────────────────────────────────
@@ -589,8 +630,12 @@ def generate_and_send(
     pdf_b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
 
     # Try to host the PDF in S3 + generate a presigned GET URL for email attachment.
-    # If S3 isn't configured, the email still goes out — just without a PDF link.
+    # If S3 isn't configured, fall back to the self-hosted PDF endpoint on the
+    # loan_agents service itself (HMAC-tokenized, 14-day TTL).
     pdf_url, pdf_url_expires_at = _maybe_upload_pdf(letter_id, pdf_bytes, issued_at)
+    if not pdf_url:
+        pdf_url = build_self_hosted_pdf_url(letter_id)
+        pdf_url_expires_at = (issued_at + timedelta(seconds=SELF_HOSTED_PDF_TTL_SECONDS)).isoformat()
 
     payload = {
         "letter_id": letter_id,
@@ -836,6 +881,28 @@ def latest_letter_for_application(application_id: str) -> Optional[dict[str, Any
             (application_id,),
         )
     return dict(row) if row else None
+
+
+def regenerate_pdf_from_audit_row(letter_id: str) -> Optional[bytes]:
+    """
+    Re-render a letter PDF from its audit row. Deterministic — same row →
+    same bytes (modulo reportlab's embedded timestamp). Returns None if the
+    letter doesn't exist.
+    """
+    row = get_letter(letter_id)
+    if not row:
+        return None
+    try:
+        issued = datetime.fromisoformat(row["issued_at"])
+    except (KeyError, ValueError, TypeError):
+        issued = datetime.now(timezone.utc)
+    return render_letter_pdf(
+        borrower_name=row.get("borrower_name", "Borrower"),
+        borrower_email=row.get("borrower_email", ""),
+        max_pp_low=float(row.get("max_pp_low", 0)),
+        max_pp_high=float(row.get("max_pp_high", 0)),
+        issued_at=issued,
+    )
 
 
 def get_letter(letter_id: str) -> Optional[dict[str, Any]]:
