@@ -316,11 +316,18 @@ def test_purchase_contract_classification_auto_opens_transaction(
     assert af["psa_terms"]["closing_date"] == "2026-06-20"
     assert af["psa_terms"]["buyer_name"] == "Marc Munoz"
 
-    # Deal-flow was POST'd with our standard headers
+    # Deal-flow was POST'd with PSA fields flattened at the top level
+    # (its /api/tx/open does `PSATerms.model_validate(body)` after popping user_id)
     args, kwargs = dealflow_post.call_args
     assert args[0] == "https://deal-flow.test/api/tx/open"
     assert kwargs["headers"]["Authorization"].startswith("Bearer ")
-    assert kwargs["json"]["psa_terms"]["property_address"] == "4521 Oak Ln Detroit MI"
+    body_sent = kwargs["json"]
+    assert "psa_terms" not in body_sent  # flattened, not nested
+    assert body_sent["property_address"] == "4521 Oak Ln Detroit MI"
+    assert body_sent["buyer_name"] == "Marc Munoz"
+    assert body_sent["purchase_price"] == 95000.0
+    assert body_sent["closing_date"] == "2026-06-20"
+    assert body_sent["user_id"] == "usr_test"
 
 
 def test_psa_missing_required_field_does_not_open_tx(
@@ -431,6 +438,14 @@ def test_dealflow_client_open_transaction_happy_path(monkeypatch):
     args, kwargs = post.call_args
     assert args[0] == "https://df.test/api/tx/open"
     assert kwargs["headers"]["Authorization"] == "Bearer shared"
+    # PSA fields are flattened at the body root, not nested under "psa_terms"
+    body = kwargs["json"]
+    assert "psa_terms" not in body
+    assert body["purchase_price"] == 100000
+    assert body["buyer_name"] == "A"
+    assert body["seller_name"] == "B"
+    assert body["property_address"] == "C"
+    assert body["user_id"] == "usr_x"
 
 
 def test_dealflow_client_transport_failure():

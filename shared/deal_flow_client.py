@@ -83,14 +83,19 @@ class DealFlowClient:
             inspection_period_days, financing_contingency_days,
             title_contingency_days, buyer/seller email+phone, agent names.
 
+        Wire shape: deal-flow's POST /api/tx/open expects PSATerms fields at
+        the top level of the body alongside `user_id` (it `PSATerms.model_validate(body)`s
+        the full request after popping user_id). So we flatten here.
+
         Returns the standard {ok, data, status, error} dict. On success,
         `data` contains the deal-flow response (typically {tx_id, ...}).
         """
-        payload = {
-            "user_id": user_id,
-            "psa_terms": psa_terms,
-            "notes": notes,
-        }
+        # Flatten psa_terms into the top-level body (per deal-flow's contract).
+        # `notes` is itself a PSATerms field — only set it if the caller passed
+        # a non-empty value and the dict doesn't already have one.
+        payload: dict[str, Any] = {**psa_terms, "user_id": user_id}
+        if notes and "notes" not in psa_terms:
+            payload["notes"] = notes
         return self._post("/api/tx/open", payload)
 
     def get_transaction(self, tx_id: str) -> dict[str, Any]:
