@@ -20,6 +20,16 @@ services:
         value: /opt/render/project/data/loan_agents.db
       - key: PYTHON_VERSION
         value: "3.11.0"
+      - key: AWS_REGION
+        value: us-east-1
+      - key: AWS_S3_BUCKET
+        sync: false
+      - key: AWS_S3_KEY_PREFIX
+        value: intake/
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data

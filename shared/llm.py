@@ -165,6 +165,77 @@ def chat_with_tools(
     raise RuntimeError(f"chat_with_tools exhausted retries. Last error: {last_err}")
 
 
+def chat_with_vision(
+    prompt: str,
+    media: list[dict[str, Any]],
+    system: str = "",
+    model_tier: Literal["standard", "reasoning"] = "standard",
+    max_tokens: int = 1024,
+    temperature: float = 0.0,
+) -> str:
+    """
+    Single-turn Claude vision call. Each `media` item is:
+        {"data": <bytes>, "media_type": "image/jpeg" | "image/png" | "image/webp"
+                                      | "image/gif" | "application/pdf"}
+
+    Anthropic-only. Raises RuntimeError if ANTHROPIC_API_KEY is unset — the
+    OpenAI fallback doesn't handle PDF natively, so document-OCR callers should
+    treat absence of Claude as a hard failure rather than silently degrade.
+    """
+    import base64
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "chat_with_vision requires ANTHROPIC_API_KEY (no OpenAI fallback for PDFs)."
+        )
+
+    blocks: list[dict[str, Any]] = []
+    for item in media:
+        media_type = item["media_type"]
+        data_b64 = base64.standard_b64encode(item["data"]).decode("ascii")
+        if media_type == "application/pdf":
+            blocks.append({
+                "type": "document",
+                "source": {"type": "base64", "media_type": media_type, "data": data_b64},
+            })
+        else:
+            blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data_b64},
+            })
+    blocks.append({"type": "text", "text": prompt})
+
+    model = (
+        ANTHROPIC_REASONING_MODEL if model_tier == "reasoning"
+        else ANTHROPIC_STANDARD_MODEL
+    )
+    client = _get_anthropic()
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": blocks}],
+    }
+    if "opus-4" not in model:
+        kwargs["temperature"] = temperature
+
+    last_err: Exception | None = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = client.messages.create(**kwargs)
+            for block in resp.content:
+                if getattr(block, "type", None) == "text":
+                    return block.text
+            return ""
+        except Exception as e:
+            last_err = e
+            print(f"[llm] chat_with_vision attempt {attempt + 1} failed: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+
+    raise RuntimeError(f"chat_with_vision exhausted retries. Last error: {last_err}")
+
+
 def chat(
     messages: list[dict],
     system: str = "",
