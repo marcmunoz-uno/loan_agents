@@ -133,12 +133,17 @@ def classify(doc_id: str):
     if autofired:
         response["autofired_letter"] = autofired
 
-    # PSA-specific side effect: if this classification was a purchase_contract,
-    # auto-open the transaction in the deal-flow service.
+    # PSA-specific side effects: open the TX in deal-flow AND create the
+    # loan record in Arive (which sends the borrower the 1003 invitation).
+    # Both are independent — either failing doesn't block the other.
     if result.doc_type == "purchase_contract":
         tx_result = _maybe_open_transaction(doc_id, result.extracted_fields)
         if tx_result:
             response["autofired_transaction"] = tx_result
+
+        arive_result = _maybe_create_arive_loan(doc_id, result.extracted_fields)
+        if arive_result:
+            response["autofired_arive_loan"] = arive_result
 
     return jsonify(response)
 
@@ -365,6 +370,87 @@ def _maybe_open_transaction(doc_id: str, extracted_fields: dict[str, Any]) -> Op
             }, "doc_id = ?", (doc_id,))
 
     return {"tx_id": tx_id, "deal_flow_status": result.get("status"), "psa_terms": psa}
+
+
+def _maybe_create_arive_loan(doc_id: str, extracted_fields: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """
+    Fire arive.create_loan on a purchase_contract classification. Arive's
+    standard workflow then sends the borrower an invitation to fill out
+    the 1003 in their POS portal — closing the "PSA received → 1003 sent"
+    gap that previously required manual LO action.
+
+    Idempotency: if intake_documents already has _arive_loan_id stamped on
+    this doc, skip.
+    """
+    doc = get_upload_status(doc_id)
+    if not doc:
+        return None
+
+    extra_blob = doc.get("extracted_fields") or {}
+    if isinstance(extra_blob, dict) and extra_blob.get("_arive_loan_id"):
+        return {"skipped": f"arive_loan_already_created:{extra_blob['_arive_loan_id']}"}
+    if isinstance(extra_blob, dict) and extra_blob.get("_arive_skipped"):
+        return {"skipped": extra_blob["_arive_skipped"]}
+
+    # Resolve borrower prequal
+    user_id = doc.get("user_id") or ""
+    app_id = doc.get("application_id") or ""
+    prequal_id = ""
+    if app_id:
+        with get_conn() as conn:
+            row = fetchone(conn, "SELECT prequal_id FROM loan_applications WHERE id = ?", (app_id,))
+        if row:
+            prequal_id = row.get("prequal_id") or ""
+    if not prequal_id:
+        return {"skipped": "no_prequal_id"}
+
+    with get_conn() as conn:
+        pq_row = fetchone(
+            conn,
+            "SELECT id, user_id, borrower_data, property_data, suggested_product "
+            "FROM loan_prequals WHERE id = ?",
+            (prequal_id,),
+        )
+    if not pq_row:
+        return {"skipped": "prequal_not_found"}
+
+    try:
+        borrower = json.loads(pq_row.get("borrower_data") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        borrower = {}
+    try:
+        prop = json.loads(pq_row.get("property_data") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        prop = {}
+    prequal = {
+        "id":            pq_row["id"],
+        "user_id":       pq_row.get("user_id") or user_id,
+        "borrower_data": borrower,
+        "property_data": prop,
+    }
+
+    from loan_officer.arive_create_loan import create_loan_in_arive
+    result = create_loan_in_arive(prequal, extracted_fields, correlation_id=doc_id)
+
+    # Persist outcome back on the intake row (mirror of the _tx_id pattern)
+    merged = dict(extra_blob) if isinstance(extra_blob, dict) else {}
+    if result.get("arive_loan_id"):
+        merged["_arive_loan_id"] = result["arive_loan_id"]
+    elif result.get("status", "").startswith("skipped:"):
+        merged["_arive_skipped"] = result["status"]
+    if merged != extra_blob:
+        with get_conn() as conn:
+            update(conn, "intake_documents", {
+                "extracted_fields": json.dumps(merged),
+                "updated_at":       datetime.now(timezone.utc).isoformat(),
+            }, "doc_id = ?", (doc_id,))
+
+    return {
+        "ok":            result.get("ok", False),
+        "status":        result.get("status", ""),
+        "arive_loan_id": result.get("arive_loan_id", ""),
+        "params_sent":   result.get("params_sent", {}),
+    }
 
 
 def _coerce_money(value: Any) -> Optional[float]:
@@ -697,6 +783,10 @@ def inbound_email_attachment():
         tx_result = _maybe_open_transaction(doc_id, result.extracted_fields)
         if tx_result:
             response["autofired_transaction"] = tx_result
+
+        arive_result = _maybe_create_arive_loan(doc_id, result.extracted_fields)
+        if arive_result:
+            response["autofired_arive_loan"] = arive_result
 
     return jsonify(response), 200
 
