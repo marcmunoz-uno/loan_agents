@@ -3,8 +3,8 @@ services:
     name: loan-agents
     runtime: python
     plan: starter
-    buildCommand: pip install -r requirements.txt && python ops/seed_data.py
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    buildCommand: pip install -r requirements.txt
+    startCommand: python ops/seed_data.py && gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
