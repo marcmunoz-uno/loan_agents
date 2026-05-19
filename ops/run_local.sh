@@ -1,5 +1,5 @@
 #!/bin/bash
-# ops/run_local.sh — Boot the deal flow agents server on :5010 with SQLite
+# ops/run_local.sh — Boot the loan_agents server on :5010 with SQLite
 set -e
 
 cd "$(dirname "$0")/.."

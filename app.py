@@ -1,11 +1,9 @@
 """
-app.py — Flask entry point for tranchi-deal-flow-agents.
+app.py — Flask entry point for loan_agents.
 
-Registers four blueprints:
+Registers two blueprints:
   - loan_officer    → /api/loan/*
-  - tx_coordinator  → /api/tx/*
   - loan_processor  → /api/processor/*
-  - orchestrator    → /api/chat/*   (unified consumer chat front-door)
 
 Deploy: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
 Local:  PORT=5010 python app.py
@@ -20,49 +18,38 @@ load_dotenv()
 
 from shared.db import init_db
 from loan_officer.routes import loan_bp
-from tx_coordinator.routes import tx_bp
 from loan_processor.routes import processor_bp
-from orchestrator.routes import chat_bp
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
 
-    # Initialize DB tables on first run
     try:
         init_db()
     except Exception as e:
         print(f"[app] DB init warning: {e}")
 
-    # Register blueprints
     app.register_blueprint(loan_bp)
-    app.register_blueprint(tx_bp)
     app.register_blueprint(processor_bp)
-    app.register_blueprint(chat_bp)
-
-    # ── Health check ──────────────────────────────────────────────────────────
 
     @app.route("/health", methods=["GET"])
     def health():
         return jsonify({
             "status": "ok",
-            "service": "tranchi-deal-flow-agents",
-            "agents": ["loan_officer", "tx_coordinator", "loan_processor"],
+            "service": "loan_agents",
+            "agents": ["loan_officer", "loan_processor"],
             "personas": [
                 "Tranchi - Loan Officer",
                 "Tranchi - Loan Processor",
-                "Tranchi - Transaction Coordinator",
             ],
             "ts": datetime.now(timezone.utc).isoformat(),
         })
 
-    # ── Root ──────────────────────────────────────────────────────────────────
-
     @app.route("/", methods=["GET"])
     def root():
         return jsonify({
-            "service": "tranchi-deal-flow-agents",
-            "description": "AI Loan Officer + Loan Processor + Transaction Coordinator for Tranchi.ai",
+            "service": "loan_agents",
+            "description": "AI Loan Officer + Loan Processor for Tranchi.ai",
             "endpoints": {
                 "health": "GET /health",
                 "loan_officer": {
@@ -76,17 +63,8 @@ def create_app() -> Flask:
                     "guidelines": "GET /api/processor/guidelines",
                     "chat": "POST /api/processor/chat",
                 },
-                "tx_coordinator": {
-                    "open": "POST /api/tx/open",
-                    "status": "GET /api/tx/<tx_id>",
-                    "chat": "POST /api/tx/<tx_id>/chat",
-                },
-                "orchestrator": {
-                    "turn": "POST /api/chat/turn",
-                    "personas": "GET /api/chat/personas",
-                },
             },
-            "docs": "See loan_officer/README.md, loan_processor/README.md, and tx_coordinator/README.md",
+            "docs": "See loan_officer/README.md and loan_processor/README.md",
         })
 
     return app

@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: tranchi-deal-flow-agents
+    name: loan-agents
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt && python ops/seed_data.py
@@ -17,11 +17,11 @@ services:
       - key: OUTBOUND_AGENT_URL
         value: https://tranchi-outbound-agent.onrender.com
       - key: DB_PATH
-        value: /opt/render/project/data/dealflow.db
+        value: /opt/render/project/data/loan_agents.db
       - key: PYTHON_VERSION
         value: "3.11.0"
     disk:
-      name: dealflow-data
+      name: loan-agents-data
       mountPath: /opt/render/project/data
       sizeGB: 1
     healthCheckPath: /health

@@ -4,7 +4,7 @@ ops/seed_data.py — Insert sample data for local smoke testing.
 Creates:
   - A sample prequal for Marc's Detroit property
   - A sample loan application (state: APP_DOCS_PENDING)
-  - A sample transaction at milestone 3 (inspection scheduled)
+  - A sample pre-underwriting report for that application
 
 Run: python ops/seed_data.py
 """
@@ -162,115 +162,6 @@ def seed():
             "uploaded_at": now,
         })
 
-    # ── Transaction ────────────────────────────────────────────────────────────
-    tx_id = "tx_seed_marc_001"
-    psa_terms = {
-        "purchase_price": 95_000,
-        "earnest_money": 2_500,
-        "closing_date": closing_date,
-        "inspection_period_days": 10,
-        "financing_contingency_days": 21,
-        "title_contingency_days": 14,
-        "seller_concessions": 0,
-        "buyer_name": "Marc Munoz",
-        "buyer_email": "marc@munoz.ltd",
-        "buyer_phone": "+13135550100",
-        "seller_name": "John Smith",
-        "seller_email": "jsmith@example.com",
-        "seller_phone": "+13135559876",
-        "buyer_agent_name": "Sarah Jones",
-        "listing_agent_name": "Bob Williams",
-        "property_address": "4521 Oak Ln, Detroit MI 48224",
-        "notes": "Seed transaction for local dev testing",
-    }
-
-    with get_conn() as conn:
-        insert(conn, "transactions", {
-            "id": tx_id,
-            "user_id": "usr_marc",
-            "psa_terms": json.dumps(psa_terms),
-            "purchase_price": 95_000,
-            "closing_date": closing_date,
-            "status": "open",
-            "current_milestone": "inspection_scheduled",
-            "property_address": "4521 Oak Ln, Detroit MI 48224",
-            "buyer_name": "Marc Munoz",
-            "seller_name": "John Smith",
-            "notes": "Seed transaction",
-            "created_at": now,
-            "updated_at": now,
-        })
-        print(f"[seed] Created transaction: {tx_id}")
-
-        # Insert parties
-        parties = [
-            ("buyer", "Marc Munoz", "marc@munoz.ltd", "+13135550100", ""),
-            ("seller", "John Smith", "jsmith@example.com", "+13135559876", ""),
-            ("buyer_agent", "Sarah Jones", "sjones@realty.com", "+13135551234", "Tranchi Realty"),
-            ("listing_agent", "Bob Williams", "bwilliams@realty.com", "+13135555678", "Detroit Properties Inc"),
-            ("inspector", "Detroit Home Inspectors LLC", "schedule@dhiinspect.com", "+13135559999", "Detroit Home Inspectors LLC"),
-        ]
-        for party_type, name, email, phone, company in parties:
-            conn.execute(
-                """INSERT INTO tx_parties (transaction_id, party_type, name, email, phone, company, added_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (tx_id, party_type, name, email, phone, company, now)
-            )
-        conn.commit()
-
-        # Insert milestones (first 3 completed, rest pending)
-        from tx_coordinator.timeline import generate_timeline
-        from shared.schemas import PSATerms
-        psa = PSATerms(**psa_terms)
-        milestones = generate_timeline(psa)
-
-        for m in milestones:
-            status = "pending"
-            completed_at = None
-            # Mark first 3 as completed for seed scenario: PSA executed, earnest money, title ordered
-            if m["name"] in ("psa_executed", "earnest_money_deposited", "title_ordered"):
-                status = "completed"
-                completed_at = now
-            conn.execute(
-                """INSERT INTO tx_milestones
-                   (transaction_id, milestone_name, milestone_label, sequence_order,
-                    target_date, status, completed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (tx_id, m["name"], m["label"], m["sequence"],
-                 m["target_date"], status, completed_at)
-            )
-        conn.commit()
-
-        # Insert contingency deadlines
-        for ctype, days in [("inspection", 10), ("financing", 21), ("title", 14)]:
-            deadline = (date.today() + timedelta(days=days)).isoformat()
-            conn.execute(
-                """INSERT INTO tx_deadlines (transaction_id, contingency_type, deadline_date, status)
-                   VALUES (?, ?, ?, 'active')""",
-                (tx_id, ctype, deadline)
-            )
-        conn.commit()
-
-        # Insert sample PSA document
-        insert(conn, "tx_documents", {
-            "transaction_id": tx_id,
-            "doc_type": "psa",
-            "s3_url": "s3://tranchi-docs-dev/tx_seed/psa_signed.pdf",
-            "party_uploaded": "buyer_agent",
-            "status": "received",
-            "notes": "Seed PSA document",
-            "uploaded_at": now,
-        })
-
-        # Log a communication
-        conn.execute(
-            """INSERT INTO tx_communications
-               (transaction_id, direction, channel, summary, full_text, occurred_at, logged_at)
-               VALUES (?, 'out', 'email', 'Sent inspection scheduling request to inspector.', '', ?, ?)""",
-            (tx_id, now, now)
-        )
-        conn.commit()
-
     # ── Sample Pre-Underwriting Report ────────────────────────────────────────
     conditions_sample = [
         {
@@ -377,11 +268,9 @@ def seed():
     print("\n[seed] Done. Sample IDs:")
     print(f"  Prequal:     {prequal_id}")
     print(f"  Application: {app_id}")
-    print(f"  Transaction: {tx_id}")
     print(f"\nSmoke test commands:")
     print(f"  curl http://localhost:5010/health")
     print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/loan/prequal/{prequal_id}")
-    print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/tx/{tx_id}")
     print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/processor/pre-underwrite/{app_id}")
     print(f"  curl -H 'Authorization: Bearer dev-secret-change-me' http://localhost:5010/api/processor/guidelines")
 

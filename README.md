@@ -1,38 +1,23 @@
-# tranchi-deal-flow-agents
+# loan_agents
 
-This repo builds the backends for two gaps found in the Tranchi.ai platform audit: the "Automated Funding System" (Finance page is a Typeform link, no backend) and the "Transaction Automation Layer" (transaction management is partially implemented). The two agents here — **AI Loan Officer** and **Transaction Coordinator** — are designed as a standalone Flask microservice that deploys alongside `tranchi-outbound-agent` on Render, or merges into the main Tranchi app later. Production codebases (`tranchi-outbound-agent`, `tranchi-ui-audit`, `county-portal-scraper`) are not touched by this repo.
+Flask microservice for Tranchi.ai's lending stack. Two agents:
 
-The 10-agent lineup below represents the full deal-flow automation stack for a real estate investor platform — from finding a deal to getting it funded, inspected, titled, and closed. This repo scaffolds the first two. The other eight are documented in `ROADMAP.md` with complexity estimates, integration requirements, and suggested build order.
+- **Tranchi - Loan Officer** (`/api/loan/*`) — borrower-facing: intake chat, prequal, application, doc collection, Arive/Zapier two-way LOS integration, lender routing.
+- **Tranchi - Loan Processor** (`/api/processor/*`) — internal pre-underwriting: scores files against `lender_guidelines/`, generates conditions, drafts credit memos, fires Zapier into Arive when clean.
 
----
-
-## Agent Lineup
-
-| # | Agent | Status |
-|---|-------|--------|
-| 1 | **Tranchi - Loan Officer** | ✅ scaffolded + Arive/Zapier wired |
-| 2 | **Tranchi - Transaction Coordinator** | ✅ scaffolded |
-| 3 | **Tranchi - Loan Processor** | ✅ scaffolded |
-| 4 | Title & Escrow Coordinator | ROADMAP |
-| 5 | Inspection Coordinator | ROADMAP |
-| 6 | Property Manager Sourcer | ROADMAP |
-| 7 | Listing Agent Liaison | ROADMAP |
-| 8 | Cash Buyer Recruiter | ROADMAP |
-| 9 | Insurance Quote Bot | ROADMAP |
-| 10 | Tax / 1031 Advisor | ROADMAP |
-| 11 | Capital Raiser | ROADMAP |
+Carved out of `tranchi-deal-flow-agents`. Designed to deploy standalone on Render alongside `tranchi-outbound-agent`, or be wired into the main Tranchi app via the same `Authorization: Bearer <TRANCHI_API_SECRET>` header.
 
 ---
 
 ## Local Quick-Start
 
 ```bash
-git clone git@github.com:marcmunoz-uno/tranchi-deal-flow-agents.git
-cd tranchi-deal-flow-agents
+git clone git@github.com:marcmunoz-uno/loan_agents.git
+cd loan_agents
 ./ops/run_local.sh
 ```
 
-The script creates a venv, installs deps, seeds sample data, and starts the server at `http://localhost:5010`.
+Creates a venv, installs deps, seeds sample data, starts the server at `http://localhost:5010`.
 
 **Smoke test:**
 ```bash
@@ -45,100 +30,87 @@ curl -X POST http://localhost:5010/api/loan/prequal \
   -H "Content-Type: application/json" \
   -d '{"borrower":{"user_id":"usr_marc","name":"Marc","credit_score":740,"liquidity":85000,"properties_owned":3,"desired_loan_amount":71250,"down_payment_pct":25},"property":{"address":"4521 Oak Ln Detroit MI","property_type":"single_family","purchase_price":95000,"monthly_rent":1200,"annual_taxes":2400,"annual_insurance":1200}}'
 
-# Check seeded transaction
+# Run pre-underwriting on the seeded application
+curl -X POST http://localhost:5010/api/processor/pre-underwrite/app_seed_marc_001 \
+  -H "Authorization: Bearer dev-secret-change-me"
+
+# Inspect lender guideline matrix
 curl -H "Authorization: Bearer dev-secret-change-me" \
-  http://localhost:5010/api/tx/tx_seed_marc_001
+  http://localhost:5010/api/processor/guidelines
 ```
 
 Set `ANTHROPIC_API_KEY` in `.env` to enable the `/chat` endpoints.
 
 ---
 
-## Integration Map
+## Flow
 
 ```
-Tranchi Web App (Express + tRPC + React)
-  └─► tranchi-deal-flow-agents (this repo, :5010)
-        ├── Tranchi - Loan Officer        /api/loan/*
-        │     ├─► Tranchi - Loan Processor /api/processor/* (internal)
-        │     │     └─► lender_guidelines/ (9 lenders, guidelines_index.json)
-        │     ├─► Zapier webhooks → Arive LOS (outbound events)
-        │     ├─► POST /api/loan/webhook/arive-update (inbound from Arive)
-        │     └─► Lender Partners (Lima One, Kiavi, New Silver, LendingOne, Roc, Anchor)
-        └── Tranchi - Transaction Coordinator  /api/tx/*
-              └─► tranchi-outbound-agent (Hope voice / iMessage)
-                    └─► Title, Inspector, Insurance via outbound comms
-
-County Portal Scraper (county-portal-scraper)
-  └─► tranchi_mcp_server.py (9 tools — property data)
-        └─► feeds into Loan Officer property scoring
+Borrower
+  │  chat
+  ▼
+Tranchi - Loan Officer        /api/loan/*
+  ├── intake chatbot          (collects 6 prequal data points)
+  ├── prequal                 (DSCR / LTV / fit-score)
+  ├── application             (state machine: NEW → DOCS → READY)
+  └── document_collector      (per-product doc checklist)
+        │
+        ▼
+Tranchi - Loan Processor      /api/processor/*
+  ├── guideline_engine        (loads lender_guidelines/*.md)
+  ├── pre_underwriting        (FICO / LTV / DSCR / PITI / cashflow)
+  ├── condition_generator     (PTSU / PTD / PTC by lender)
+  └── credit_memo             (Claude-drafted)
+        │
+        ▼ (if clean — auto-fire Zapier)
+Arive LOS  →  underwriter  →  webhook back to /api/loan/webhook/arive-update
+        │
+        ▼
+Loan Officer advances status: UNDERWRITING → APPROVED / CONDITIONS / DECLINED
 ```
 
-**Auth:** All endpoints accept `Authorization: Bearer <TRANCHI_API_SECRET>` — same header as `tranchi-outbound-agent`. One config change to wire into the main app.
-
-**Webhook:** Lender partners push status updates to `POST /api/loan/webhook/lender-update`. Signed with HMAC SHA256 (`LENDER_WEBHOOK_SECRET`).
+**Auth:** `Authorization: Bearer <TRANCHI_API_SECRET>` on all endpoints.
+**Webhooks:** Lender + Arive callbacks signed with HMAC SHA256.
 
 ---
 
 ## Deployment
 
-See `ops/deploy_render.md` for full Render deployment steps and env var checklist.
-
-```bash
-# render.yaml is preconfigured — just connect the repo in Render dashboard
-# then set the env vars listed in .env.example
-```
+See `ops/deploy_render.md`. `render.yaml` is preconfigured — connect the repo in Render and set the env vars from `.env.example`.
 
 ---
 
 ## Repo Structure
 
 ```
-app.py                      # Flask entry point — registers all blueprints
-shared/                     # Auth, DB, LLM, webhooks, Pydantic schemas
-  migrations/001_initial.sql       # Base tables (loan officer + TX coordinator)
-  migrations/002_loan_processor.sql # Loan processor tables
-loan_officer/               # Tranchi - Loan Officer backend (blueprint: /api/loan/*)
-  arive_zapier.py           # Arive/Zapier two-way integration
-  system_prompt.md          # Loan Officer persona + rules
-  workflows.py              # State machine: NEW → ... → FUNDED
-  lender_router.py          # Product scoring + lender matching
-  prequal.py                # DSCR/LTV/fit-score computation
-  lender_partners.py        # 6 lender partner configs
-  document_collector.py     # Required docs per product
-  routes.py                 # 9 Flask endpoints (incl. arive-update webhook)
-  tests/test_workflow.py    # State machine + prequal + router tests
-  tests/test_arive_zapier.py# Arive/Zapier integration tests
-loan_processor/             # Tranchi - Loan Processor backend (blueprint: /api/processor/*)
-  system_prompt.md          # Loan Processor persona + job + guardrails
-  pre_underwriting.py       # Core pre-UW engine + PreUnderwritingReport
-  guideline_engine.py       # Loads + queries lender_guidelines/
-  condition_generator.py    # Generates condition lists per product + lender
-  credit_memo.py            # Drafts LLM-powered credit memos
-  routes.py                 # 6 Flask endpoints
+app.py                              # Flask entry — registers loan_bp + processor_bp
+shared/                             # Auth, DB, LLM, schemas, webhooks
+  migrations/001_initial.sql        # loan_prequals, loan_applications, loan_documents
+  migrations/002_loan_processor.sql # pre_underwriting_reports, intake_sessions
+  browserbase.py                    # Browserbase co-pilot helper
+  zapier_mcp.py                     # Zapier MCP transport
+loan_officer/                       # /api/loan/*
+  intake/                           # Stateful intake chatbot (chatbot.py et al.)
+  arive_zapier.py                   # Arive two-way LOS integration
+  workflows.py                      # Application state machine
+  lender_router.py                  # Product scoring + lender matching
+  prequal.py                        # DSCR/LTV/fit-score computation
+  lender_partners.py                # 6 lender partner configs
+  document_collector.py             # Required docs per product
+  routes.py                         # Loan endpoints
+  tests/                            # workflow + Arive integration tests
+loan_processor/                     # /api/processor/*
+  pre_underwriting.py               # Pre-UW engine + PreUnderwritingReport
+  guideline_engine.py               # Loads + queries lender_guidelines/
+  condition_generator.py            # Conditions per product + lender
+  credit_memo.py                    # LLM-powered credit memos
+  routes.py                         # Processor endpoints
   tests/test_pre_underwriting.py
-tx_coordinator/             # Tranchi - Transaction Coordinator backend (blueprint: /api/tx/*)
-  system_prompt.md          # Transaction Coordinator persona + escalation rules
-  timeline.py               # 16-milestone timeline generator
-  deadline_engine.py        # Contingency deadline tracking + alerting
-  parties.py                # Party management
-  document_vault.py         # Doc checklist + status
-  communication_hub.py      # All comms across parties
-  routes.py                 # 8 Flask endpoints
-  tests/test_timeline.py    # Timeline + deadline engine tests
-lender_guidelines/          # Lender guidelines (9 products across 6 lenders)
-  guidelines_index.json     # Machine-readable matrix for fast lookup
-  lima_one_dscr.md          # Lima One DSCR guidelines
-  lima_one_fix_flip.md
-  kiavi_dscr.md
-  kiavi_brrrr.md
-  new_silver_fix_flip.md
-  lendingone_dscr.md
-  roc_capital_dscr.md
-  roc_capital_brrrr.md
-  anchor_loans_fix_flip.md
+lender_guidelines/                  # 9 products across 6 lenders
+  guidelines_index.json             # Machine-readable matrix
+  lima_one_dscr.md  kiavi_dscr.md  …
 ops/
-  seed_data.py              # Sample borrower + property + transaction + pre-UW report
-  run_local.sh              # One-command local dev boot
-  deploy_render.md          # Render deployment guide
+  seed_data.py                      # Sample borrower + application + pre-UW report
+  run_local.sh                      # One-command local dev boot
+  deploy_render.md                  # Render deployment guide
 ```

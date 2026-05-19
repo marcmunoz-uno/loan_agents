@@ -13,7 +13,7 @@
 
 ### 1. Connect the repo to Render
 
-From the Render dashboard: New → Web Service → Connect Repository → select `tranchi-deal-flow-agents`.
+From the Render dashboard: New → Web Service → Connect Repository → select `loan_agents`.
 
 Or use the CLI:
 ```bash
@@ -28,10 +28,12 @@ In Render dashboard → Environment tab, set:
 |----------|-------|-------|
 | `TRANCHI_API_SECRET` | (your secret) | Must match main app and outbound-agent |
 | `ANTHROPIC_API_KEY` | (your key) | Required for AI endpoints |
-| `DB_PATH` | `/opt/render/project/data/dealflow.db` | Auto-set by render.yaml |
+| `DB_PATH` | `/opt/render/project/data/loan_agents.db` | Auto-set by render.yaml |
 | `OUTBOUND_AGENT_URL` | `https://tranchi-outbound-agent.onrender.com` | Auto-set |
 | `OPENAI_API_KEY` | (optional) | Only needed if Anthropic fails |
 | `LENDER_WEBHOOK_SECRET` | (your secret) | Share with lender partners |
+| `ARIVE_WEBHOOK_SECRET` | (your secret) | HMAC secret for inbound Arive webhooks |
+| `ZAPIER_HOOK_*` | (Zapier catch-hook URLs) | One per outbound event — see `.env.example` |
 
 ### 3. Deploy
 
@@ -44,15 +46,15 @@ git push origin main
 ### 4. Verify
 
 ```bash
-curl https://tranchi-deal-flow-agents.onrender.com/health
+curl https://loan-agents.onrender.com/health
 ```
 
 Expected response:
 ```json
 {
-  "service": "tranchi-deal-flow-agents",
+  "service": "loan_agents",
   "status": "ok",
-  "agents": ["loan_officer", "tx_coordinator"]
+  "agents": ["loan_officer", "loan_processor"]
 }
 ```
 
@@ -75,9 +77,9 @@ The `render.yaml` mounts a persistent disk at `/opt/render/project/data`. SQLite
 
 When ready to move from SQLite to MySQL:
 
-1. Point `DB_PATH` to `mysql://user:pass@host:3306/tranchi_deal_flow`
+1. Point `DB_PATH` to `mysql://user:pass@host:3306/loan_agents`
 2. Update `shared/db.py` to use `mysql-connector-python` instead of `sqlite3`
-3. Run `001_initial.sql` against the MySQL instance
+3. Run `001_initial.sql` and `002_loan_processor.sql` against the MySQL instance
 4. Match the `user_id` foreign key references to Tranchi's `users.id` column
 
 ---
@@ -96,6 +98,6 @@ Set `OUTBOUND_AGENT_URL` in Render env vars to enable this.
 
 Call these endpoints from the Tranchi web app backend:
 - `POST /api/loan/prequal` — when investor requests financing
-- `POST /api/tx/open` — when PSA is uploaded/executed
-- `GET /api/tx/:id` — for transaction status panel
-- `POST /api/loan/chat` + `POST /api/tx/:id/chat` — for in-app AI chat
+- `POST /api/loan/application` — when borrower starts a full application
+- `POST /api/loan/chat` — for in-app AI loan-officer chat
+- `POST /api/processor/pre-underwrite/:app_id` — to run pre-underwriting before file submission
