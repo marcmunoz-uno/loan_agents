@@ -131,8 +131,12 @@ class ZapierMCPClient:
         # mcp isn't installed yet (e.g. dev environments without the dep).
         from mcp.client.session import ClientSession
 
-        headers = {}
-        if self.api_key:
+        # If the endpoint URL already carries a `?token=…` (Zapier's modern
+        # connect URLs), sending a separate bearer header conflicts with the
+        # URL token and Zapier returns 401. Skip the header in that case.
+        url_carries_auth = "token=" in self.endpoint or "/s/" in self.endpoint
+        headers: dict[str, str] = {}
+        if self.api_key and not url_carries_auth:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         use_sse_legacy = self.endpoint.rstrip("/").endswith("/sse")
