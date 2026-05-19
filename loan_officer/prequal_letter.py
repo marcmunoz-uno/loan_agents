@@ -34,7 +34,7 @@ import hashlib
 import hmac
 import time
 
-from shared.db import get_conn, fetchone, fetchall, insert
+from shared.db import get_conn, fetchone, fetchall, insert, update
 from shared.s3_client import S3NotConfigured, get_default_client
 from shared.zapier_mcp import ZapierMCPClient
 from loan_officer.arive_zapier import fire_zap
@@ -656,6 +656,38 @@ def generate_and_send(
         "pdf_url": pdf_url,
     }
 
+    breakdown = {
+        "intake": intake,
+        "range": rng,
+    }
+
+    # IMPORTANT: persist the audit row BEFORE calling Zapier. Zapier fetches
+    # the self-hosted pdf_url synchronously during the Gmail Send call — if
+    # we INSERT after, Zapier hits a 404 because the row hasn't landed yet.
+    with get_conn() as conn:
+        insert(conn, "prequal_letters", {
+            "letter_id": letter_id,
+            "prequal_id": prequal_id,
+            "application_id": application_id,
+            "borrower_name": borrower_name,
+            "borrower_email": borrower_email,
+            "max_pp_low": rng["max_pp_low"],
+            "max_pp_high": rng["max_pp_high"],
+            "liquid_assets": liquid_assets,
+            "monthly_rent_used": monthly_rent if monthly_rent > 0 else None,
+            "rate_low_pct": 5.875,
+            "rate_high_pct": 8.0,
+            "down_pct_low": 20.0,
+            "issued_at": issued_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "zap_fired": 0,
+            "sent_to": "",
+            "pdf_url": pdf_url,
+            "pdf_url_expires_at": pdf_url_expires_at,
+            "breakdown": json.dumps(breakdown),
+            "created_at": _now(),
+        })
+
     zap_fired = False
     mcp_send_status = "skipped:not_attempted"
     if not skip_send and borrower_email:
@@ -677,34 +709,13 @@ def generate_and_send(
             result = fire_zap("prequal_letter_sent", payload, correlation_id=letter_id)
             zap_fired = bool(result.get("success"))
 
-    breakdown = {
-        "intake": intake,
-        "range": rng,
-    }
-
-    with get_conn() as conn:
-        insert(conn, "prequal_letters", {
-            "letter_id": letter_id,
-            "prequal_id": prequal_id,
-            "application_id": application_id,
-            "borrower_name": borrower_name,
-            "borrower_email": borrower_email,
-            "max_pp_low": rng["max_pp_low"],
-            "max_pp_high": rng["max_pp_high"],
-            "liquid_assets": liquid_assets,
-            "monthly_rent_used": monthly_rent if monthly_rent > 0 else None,
-            "rate_low_pct": 5.875,
-            "rate_high_pct": 8.0,
-            "down_pct_low": 20.0,
-            "issued_at": issued_at.isoformat(),
-            "expires_at": expires_at.isoformat(),
-            "zap_fired": 1 if zap_fired else 0,
-            "sent_to": borrower_email if zap_fired else "",
-            "pdf_url": pdf_url,
-            "pdf_url_expires_at": pdf_url_expires_at,
-            "breakdown": json.dumps(breakdown),
-            "created_at": _now(),
-        })
+    # Update the audit row with the actual send outcome.
+    if zap_fired or mcp_send_status != "skipped:not_attempted":
+        with get_conn() as conn:
+            update(conn, "prequal_letters", {
+                "zap_fired": 1 if zap_fired else 0,
+                "sent_to": borrower_email if zap_fired else "",
+            }, "letter_id = ?", (letter_id,))
 
     return PrequalLetter(
         letter_id=letter_id,
