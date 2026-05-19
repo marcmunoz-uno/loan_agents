@@ -134,12 +134,27 @@ class S3Client:
             HttpMethod="GET",
         )
 
-    # ── Read / delete ─────────────────────────────────────────────────────────
+    # ── Read / write / delete ─────────────────────────────────────────────────
 
     def get_object_bytes(self, s3_key: str) -> bytes:
         """Download the full object. Use sparingly — OCR needs this for PDF base64."""
         obj = self._client().get_object(Bucket=self.bucket, Key=s3_key)
         return obj["Body"].read()
+
+    def put_object_bytes(
+        self,
+        *,
+        s3_key: str,
+        data: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        """Server-side upload. Used for artifacts the server generates (e.g. PDFs)."""
+        self._client().put_object(
+            Bucket=self.bucket,
+            Key=s3_key,
+            Body=data,
+            ContentType=content_type,
+        )
 
     def head_object(self, s3_key: str) -> dict:
         return self._client().head_object(Bucket=self.bucket, Key=s3_key)

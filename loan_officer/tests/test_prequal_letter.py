@@ -308,6 +308,111 @@ def test_generate_and_send_uses_liquidity_override(temp_db):
     assert letter_overrid.max_pp_high > letter_self.max_pp_high
 
 
+# ── S3 upload + Zapier MCP send paths ────────────────────────────────────────
+
+def test_generate_and_send_uploads_to_s3_when_configured(temp_db, stub_s3):
+    """When S3 is configured, the PDF is uploaded and a presigned URL is included."""
+    _seed_prequal("pq_s3")
+    with patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
+        letter = generate_and_send("pq_s3", skip_send=True)
+
+    assert letter.pdf_url == "https://test-bucket.s3.amazonaws.com/signed-get"
+    assert letter.pdf_url_expires_at
+    stub_s3.put_object_bytes.assert_called_once()
+    args, kwargs = stub_s3.put_object_bytes.call_args
+    assert kwargs["s3_key"] == f"prequal-letters/{letter.letter_id}.pdf"
+    assert kwargs["content_type"] == "application/pdf"
+
+
+def test_generate_and_send_no_s3_skips_upload(temp_db):
+    """When S3 is unconfigured, the letter still generates — just without a URL."""
+    from shared.s3_client import S3Client
+    bare = S3Client(bucket="")
+    _seed_prequal("pq_no_s3")
+    with patch("loan_officer.prequal_letter.get_default_client", return_value=bare), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
+        letter = generate_and_send("pq_no_s3", skip_send=True)
+
+    assert letter.pdf_url == ""
+    assert letter.pdf_url_expires_at == ""
+
+
+def test_generate_and_send_s3_upload_failure_does_not_block_letter(temp_db, stub_s3):
+    """If S3 upload throws, the letter still generates without a URL."""
+    stub_s3.put_object_bytes.side_effect = RuntimeError("S3 down")
+    _seed_prequal("pq_s3_fail")
+    with patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
+        letter = generate_and_send("pq_s3_fail", skip_send=True)
+
+    assert letter.pdf_url == ""
+    assert letter.letter_id.startswith("pql_")  # letter still produced
+
+
+def test_generate_and_send_uses_mcp_when_configured(temp_db, stub_s3):
+    """Server-side Zapier MCP is the preferred path when configured."""
+    _seed_prequal("pq_mcp")
+    fake_mcp = type("MCP", (), {
+        "configured": True,
+        "execute": lambda self, **kw: {"isError": False, "content": []},
+    })()
+    with patch("loan_officer.prequal_letter.ZapierMCPClient", return_value=fake_mcp), \
+         patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.fire_zap") as zap:
+        letter = generate_and_send("pq_mcp")
+
+    assert letter.mcp_send_status == "sent"
+    assert letter.zap_fired is True
+    # MCP succeeded → webhook fallback should NOT fire
+    zap.assert_not_called()
+
+
+def test_generate_and_send_falls_back_to_webhook_when_mcp_unconfigured(temp_db, stub_s3):
+    """When MCP isn't set, fall through to the existing webhook path."""
+    _seed_prequal("pq_fb")
+    fake_mcp = type("MCP", (), {
+        "configured": False,
+        "execute": lambda self, **kw: (_ for _ in ()).throw(AssertionError("should not be called")),
+    })()
+    with patch("loan_officer.prequal_letter.ZapierMCPClient", return_value=fake_mcp), \
+         patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}) as zap:
+        letter = generate_and_send("pq_fb")
+
+    assert letter.mcp_send_status == "skipped:zapier_mcp_not_configured"
+    assert letter.zap_fired is True  # webhook reported success
+    zap.assert_called_once()
+
+
+def test_generate_and_send_mcp_failure_falls_back_to_webhook(temp_db, stub_s3):
+    """If MCP is configured but execute raises, we still try the webhook."""
+    _seed_prequal("pq_mcp_err")
+    fake_mcp = type("MCP", (), {
+        "configured": True,
+        "execute": lambda self, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    })()
+    with patch("loan_officer.prequal_letter.ZapierMCPClient", return_value=fake_mcp), \
+         patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}) as zap:
+        letter = generate_and_send("pq_mcp_err")
+
+    assert letter.mcp_send_status.startswith("failed:")
+    zap.assert_called_once()
+
+
+def test_pdf_url_persists_to_audit_row(temp_db, stub_s3):
+    _seed_prequal("pq_persist")
+    with patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
+        letter = generate_and_send("pq_persist", skip_send=True)
+
+    row = get_letter(letter.letter_id)
+    assert row is not None
+    assert row["pdf_url"] == letter.pdf_url
+    assert row["pdf_url_expires_at"] == letter.pdf_url_expires_at
+
+
 def test_generate_and_send_uses_intake_docs_over_self_reported(temp_db):
     _seed_prequal("pq_with_intake", liquidity=1_000)
     # Wire an application + bank stmt

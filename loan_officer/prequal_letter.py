@@ -31,7 +31,11 @@ from io import BytesIO
 from typing import Any, Optional
 
 from shared.db import get_conn, fetchone, fetchall, insert
+from shared.s3_client import S3NotConfigured, get_default_client
+from shared.zapier_mcp import ZapierMCPClient
 from loan_officer.arive_zapier import fire_zap
+
+PDF_URL_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days
 
 
 # ── Underwriting params ──────────────────────────────────────────────────────
@@ -477,8 +481,11 @@ class PrequalLetter:
     liquid_assets: float
     monthly_rent_used: Optional[float]
     pdf_base64: str
+    pdf_url: str
+    pdf_url_expires_at: str
     sent_to: str
     zap_fired: bool
+    mcp_send_status: str           # "sent" | "skipped:<reason>" | "failed:<error>"
     expires_at: str
     issued_at: str
     breakdown: dict[str, Any]
@@ -569,6 +576,9 @@ def generate_and_send(
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(days=LETTER_VALIDITY_DAYS)
 
+    letter_id = f"pql_{uuid.uuid4().hex[:14]}"
+    application_id = _find_application_for_prequal(prequal_id) or ""
+
     pdf_bytes = render_letter_pdf(
         borrower_name=borrower_name,
         borrower_email=borrower_email,
@@ -578,8 +588,9 @@ def generate_and_send(
     )
     pdf_b64 = base64.standard_b64encode(pdf_bytes).decode("ascii")
 
-    letter_id = f"pql_{uuid.uuid4().hex[:14]}"
-    application_id = _find_application_for_prequal(prequal_id) or ""
+    # Try to host the PDF in S3 + generate a presigned GET URL for email attachment.
+    # If S3 isn't configured, the email still goes out — just without a PDF link.
+    pdf_url, pdf_url_expires_at = _maybe_upload_pdf(letter_id, pdf_bytes, issued_at)
 
     payload = {
         "letter_id": letter_id,
@@ -597,12 +608,29 @@ def generate_and_send(
         "issued_at": issued_at.isoformat(),
         "expires_at": expires_at.isoformat(),
         "pdf_base64": pdf_b64,
+        "pdf_url": pdf_url,
     }
 
     zap_fired = False
+    mcp_send_status = "skipped:not_attempted"
     if not skip_send and borrower_email:
-        result = fire_zap("prequal_letter_sent", payload, correlation_id=letter_id)
-        zap_fired = bool(result.get("success"))
+        # Preferred path: server-side Zapier MCP → Gmail Send directly.
+        mcp_send_status = _send_via_zapier_mcp(
+            borrower_name=borrower_name,
+            borrower_email=borrower_email,
+            max_pp_low=rng["max_pp_low"],
+            max_pp_high=rng["max_pp_high"],
+            issued_at=issued_at,
+            expires_at=expires_at,
+            pdf_url=pdf_url,
+            letter_id=letter_id,
+        )
+        if mcp_send_status.startswith("sent"):
+            zap_fired = True
+        else:
+            # Fallback: fire the webhook so any user-configured Zap can pick it up.
+            result = fire_zap("prequal_letter_sent", payload, correlation_id=letter_id)
+            zap_fired = bool(result.get("success"))
 
     breakdown = {
         "intake": intake,
@@ -627,6 +655,8 @@ def generate_and_send(
             "expires_at": expires_at.isoformat(),
             "zap_fired": 1 if zap_fired else 0,
             "sent_to": borrower_email if zap_fired else "",
+            "pdf_url": pdf_url,
+            "pdf_url_expires_at": pdf_url_expires_at,
             "breakdown": json.dumps(breakdown),
             "created_at": _now(),
         })
@@ -645,12 +675,167 @@ def generate_and_send(
         liquid_assets=liquid_assets,
         monthly_rent_used=monthly_rent if monthly_rent > 0 else None,
         pdf_base64=pdf_b64,
+        pdf_url=pdf_url,
+        pdf_url_expires_at=pdf_url_expires_at,
         sent_to=borrower_email if zap_fired else "",
         zap_fired=zap_fired,
+        mcp_send_status=mcp_send_status,
         expires_at=expires_at.isoformat(),
         issued_at=issued_at.isoformat(),
         breakdown=breakdown,
     )
+
+
+# ── S3 + Zapier MCP transport ────────────────────────────────────────────────
+
+def _maybe_upload_pdf(letter_id: str, pdf_bytes: bytes, issued_at: datetime) -> tuple[str, str]:
+    """
+    Upload the PDF to S3 with a 7-day presigned GET URL. Returns ("", "") if
+    S3 isn't configured — the email path tolerates a missing URL.
+    """
+    s3 = get_default_client()
+    if not s3.configured:
+        return "", ""
+    s3_key = f"prequal-letters/{letter_id}.pdf"
+    try:
+        s3.put_object_bytes(s3_key=s3_key, data=pdf_bytes, content_type="application/pdf")
+        url = s3.generate_presigned_get(s3_key, expires_in=PDF_URL_TTL_SECONDS)
+    except Exception as e:
+        # Never let storage failure block the email — log + carry on.
+        print(f"[prequal_letter] S3 upload failed for {letter_id}: {e}")
+        return "", ""
+    expires_at = (issued_at + timedelta(seconds=PDF_URL_TTL_SECONDS)).isoformat()
+    return url, expires_at
+
+
+def _send_via_zapier_mcp(
+    *,
+    borrower_name: str,
+    borrower_email: str,
+    max_pp_low: float,
+    max_pp_high: float,
+    issued_at: datetime,
+    expires_at: datetime,
+    pdf_url: str,
+    letter_id: str,
+) -> str:
+    """
+    Server-side Gmail Send via Zapier MCP. Returns one of:
+        "sent"
+        "skipped:zapier_mcp_not_configured"
+        "skipped:zapier_mcp_module_missing"
+        "failed:<short error>"
+    """
+    client = ZapierMCPClient()
+    if not client.configured:
+        return "skipped:zapier_mcp_not_configured"
+
+    subject = "Your Pre-Qualification — Non-QM DSCR Loan"
+    body_html = _render_email_html(
+        borrower_name=borrower_name,
+        borrower_email=borrower_email,
+        max_pp_low=max_pp_low,
+        max_pp_high=max_pp_high,
+        issued_at=issued_at,
+        expires_at=expires_at,
+        pdf_url=pdf_url,
+    )
+
+    params: dict[str, Any] = {
+        "to": [borrower_email],
+        "subject": subject,
+        "body": body_html,
+        "body_type": "html",
+        "from_name": DEFAULT_SIGNER["lo_name"],
+        "signature_delimiter": "false",
+    }
+    if pdf_url:
+        params["file"] = pdf_url  # Gmail Send Email accepts a public URL
+
+    try:
+        client.execute(
+            app="gmail",
+            action="message",
+            mode="write",
+            params=params,
+            instructions=(
+                "Send the pre-qualification letter email to the borrower. "
+                "Body is fully rendered HTML; do not paraphrase. "
+                f"correlation_id={letter_id}"
+            ),
+            output="The Gmail message id and thread id of the sent email.",
+        )
+        return "sent"
+    except ModuleNotFoundError:
+        return "skipped:zapier_mcp_module_missing"
+    except Exception as e:
+        return f"failed:{str(e)[:200]}"
+
+
+def _render_email_html(
+    *,
+    borrower_name: str,
+    borrower_email: str,
+    max_pp_low: float,
+    max_pp_high: float,
+    issued_at: datetime,
+    expires_at: datetime,
+    pdf_url: str,
+) -> str:
+    money = lambda v: f"${v:,.0f}"
+    attachment_block = ""
+    if pdf_url:
+        attachment_block = (
+            f'<p style="margin-top:16px;"><b>Your letter PDF:</b> '
+            f'<a href="{pdf_url}">Download</a> '
+            f'(valid for 7 days)</p>'
+        )
+    return f"""\
+<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;color:#222;line-height:1.5;">
+  <div style="text-align:center;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:24px;">
+    <div style="font-size:18px;font-weight:bold;">{DEFAULT_SIGNER['firm_name']}</div>
+    <div style="font-size:11px;color:#666;">{DEFAULT_SIGNER['firm_address_line_1']} • {DEFAULT_SIGNER['firm_address_line_2']}</div>
+  </div>
+  <p style="font-size:12px;color:#666;">{issued_at.strftime('%m/%d/%Y')}</p>
+  <p>{borrower_name}<br>{borrower_email}</p>
+  <p><b>Re: Mortgage Pre-Qualification — Non-QM DSCR Loan</b></p>
+  <p>Dear {borrower_name},</p>
+  <p>Based on our review of the financial documentation you provided, you are pre-qualified for a Non-QM DSCR Loan under the following parameters:</p>
+  <table style="border-top:1px solid #888;border-bottom:1px solid #888;border-collapse:collapse;width:100%;margin:12px 0;">
+    <tr><td style="padding:6px 4px;font-weight:bold;width:55%;">Maximum Purchase Price</td><td style="padding:6px 4px;">{money(max_pp_low)} – {money(max_pp_high)}</td></tr>
+    <tr><td style="padding:6px 4px;font-weight:bold;">Minimum Down Payment</td><td style="padding:6px 4px;">20%</td></tr>
+    <tr><td style="padding:6px 4px;font-weight:bold;">Interest Rate Range</td><td style="padding:6px 4px;">5.875% – 8.000%</td></tr>
+  </table>
+  <p><b>This pre-qualification is subject to:</b></p>
+  <ul>
+    <li>Satisfactory title report on the subject property</li>
+    <li>Appraisal supporting the purchase price and projected rental income</li>
+    <li>Final loan-program availability at the time of application</li>
+  </ul>
+  {attachment_block}
+  <h4 style="margin-top:24px;margin-bottom:6px;">Important Disclosures</h4>
+  <p style="font-size:11px;color:#444;">This Pre-Qualification is not a commitment to lend. Any material change in your financial or employment status will require re-qualification. Any material omission or misrepresentation in your loan application may void this Pre-Qualification.</p>
+  <p style="font-size:11px;color:#444;">This approval is valid for {LETTER_VALIDITY_DAYS} days from the date of this letter (through {expires_at.strftime('%m/%d/%Y')}). After expiration, credit documentation must be resubmitted to extend the pre-qualification.</p>
+  <p style="margin-top:24px;">Please contact me with any questions.</p>
+  <p>Sincerely,</p>
+  <p><b>{DEFAULT_SIGNER['lo_name']}</b><br>{DEFAULT_SIGNER['lo_title']}<br>{DEFAULT_SIGNER['lo_email']}<br>{DEFAULT_SIGNER['lo_phone']}</p>
+</div>"""
+
+
+# ── Convenience: dedup / completeness-triggered auto-fire ────────────────────
+
+def latest_letter_for_application(application_id: str) -> Optional[dict[str, Any]]:
+    """Most recent letter row for a given application_id (or None)."""
+    if not application_id:
+        return None
+    with get_conn() as conn:
+        row = fetchone(
+            conn,
+            "SELECT * FROM prequal_letters WHERE application_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (application_id,),
+        )
+    return dict(row) if row else None
 
 
 def get_letter(letter_id: str) -> Optional[dict[str, Any]]:

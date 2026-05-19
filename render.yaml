@@ -46,6 +46,10 @@ services:
         value: "marc@munoz.ltd"
       - key: LO_SIGNER_PHONE
         value: "(917) 981-0032"
+      - key: ZAPIER_MCP_ENDPOINT
+        sync: false
+      - key: ZAPIER_MCP_API_KEY
+        sync: false
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data

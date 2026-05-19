@@ -77,6 +77,7 @@ def stub_s3():
     client.generate_presigned_put = MagicMock(side_effect=_presign)
     client.head_object = MagicMock(return_value={"ContentLength": 12345})
     client.get_object_bytes = MagicMock(return_value=b"fake-pdf-bytes")
+    client.put_object_bytes = MagicMock()
     client.generate_presigned_get = MagicMock(return_value="https://test-bucket.s3.amazonaws.com/signed-get")
     client.delete_object = MagicMock()
     return client

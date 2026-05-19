@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS prequal_letters (
     breakdown           TEXT DEFAULT '{}',          -- JSON: intake docs used + math
     zap_fired           INTEGER NOT NULL DEFAULT 0, -- 0|1
     sent_to             TEXT DEFAULT '',
+    pdf_url             TEXT DEFAULT '',            -- presigned S3 URL (if configured)
+    pdf_url_expires_at  TEXT DEFAULT '',            -- ISO ts when the presigned URL stops working
     issued_at           TEXT NOT NULL,              -- ISO ts
     expires_at          TEXT NOT NULL,              -- ISO ts (issued_at + 90d)
     created_at          TEXT NOT NULL,

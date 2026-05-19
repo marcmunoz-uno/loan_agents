@@ -235,6 +235,148 @@ def test_completeness_uses_classified_doc_type(app_client, auth_headers, stub_s3
     assert body["completion_pct"] < 100
 
 
+# ── Auto-fire prequal letter from /classify ───────────────────────────────────
+
+def _seed_prequal_and_app(app_id="app_autofire_1", prequal_id="pq_autofire_1"):
+    """Seed a prequal + application so the autofire path has somewhere to land."""
+    from shared.db import get_conn, insert
+    now = "2026-05-19T00:00:00+00:00"
+    with get_conn() as conn:
+        insert(conn, "loan_prequals", {
+            "id":                       prequal_id,
+            "user_id":                  "usr_marc",
+            "borrower_data":            '{"user_id":"usr_marc","name":"Maya","email":"maya@example.com","liquidity":25000}',
+            "property_data":            '{"address":"100 Test Ln","property_type":"single_family","monthly_rent":900,"purchase_price":80000,"annual_taxes":2000,"annual_insurance":1000}',
+            "score":                    72.0,
+            "suggested_product":        "dscr",
+            "dscr":                     1.05,
+            "ltv":                      0.7,
+            "monthly_payment_estimate": 500,
+            "strengths":                "[]", "concerns": "[]", "next_steps": "[]",
+            "status":                   "scored", "notes": "",
+            "created_at":               now, "updated_at": now,
+        })
+        insert(conn, "loan_applications", {
+            "id":                app_id,
+            "prequal_id":        prequal_id,
+            "user_id":           "usr_marc",
+            "status":            "APP_DOCS_PENDING",
+            "current_state":     "APP_DOCS_PENDING",
+            "lender_partner":    "",
+            "lender_ref_id":     "",
+            "docs_required":     "[]",
+            "docs_received":     "[]",
+            "underwriter_notes": "",
+            "approved_amount":   None,
+            "approved_rate":     None,
+            "approved_term":     None,
+            "conditions":        "[]",
+            "audit_log":         "[]",
+            "created_at":        now, "updated_at": now,
+        })
+
+
+def _upload_classified_doc(app_client, auth_headers, stub_s3, app_id, declared_type):
+    """Helper: presign → confirm so the doc lands in 'uploaded' state attached to app_id."""
+    p = app_client.post("/api/intake/upload/presign", headers=auth_headers,
+                        json={"deal_id": "d", "filename": f"{declared_type}.pdf",
+                              "content_type": "application/pdf",
+                              "application_id": app_id,
+                              "declared_doc_type": declared_type}).get_json()
+    app_client.post("/api/intake/upload/confirm", headers=auth_headers,
+                    json={"doc_id": p["doc_id"]})
+    return p["doc_id"]
+
+
+def test_classify_autofires_letter_when_dscr_checklist_complete(app_client, auth_headers, stub_s3):
+    """The DSCR checklist requires bank_stmt + rent_roll + purchase_contract.
+    After classifying the final required doc, the letter should auto-generate."""
+    _seed_prequal_and_app()
+    fake_mcp = type("MCP", (), {"configured": False, "execute": lambda self, **kw: {}})()
+
+    vision_payload = '{"doc_type": "bank_stmt", "confidence": 0.95, "extracted_fields": {"ending_balance": 25000}, "warnings": []}'
+
+    with patch("loan_officer.intake.upload.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.intake.ocr_classifier.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.intake.ocr_classifier.chat_with_vision", return_value=vision_payload), \
+         patch("loan_officer.prequal_letter.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.prequal_letter.ZapierMCPClient", return_value=fake_mcp), \
+         patch("loan_officer.prequal_letter.fire_zap", return_value={"success": True}):
+        # Upload rent_roll + purchase_contract upfront
+        _upload_classified_doc(app_client, auth_headers, stub_s3, "app_autofire_1", "rent_roll")
+        _upload_classified_doc(app_client, auth_headers, stub_s3, "app_autofire_1", "purchase_contract")
+        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_autofire_1", "bank_stmt")
+        resp = app_client.post(f"/api/intake/upload/{bank_doc}/classify", headers=auth_headers)
+
+    body = resp.get_json()
+    assert resp.status_code == 200, body
+    assert body["doc_type"] == "bank_stmt"
+    assert "autofired_letter" in body, body
+    af = body["autofired_letter"]
+    assert af["letter_id"].startswith("pql_")
+    assert af["max_pp_low"] > 0
+    assert af["max_pp_high"] >= af["max_pp_low"]
+
+
+def test_classify_no_autofire_when_checklist_incomplete(app_client, auth_headers, stub_s3):
+    """Classifying one doc when the checklist still needs others should NOT fire a letter."""
+    _seed_prequal_and_app("app_partial", "pq_partial")
+    vision_payload = '{"doc_type": "bank_stmt", "confidence": 0.9, "extracted_fields": {}, "warnings": []}'
+    with patch("loan_officer.intake.upload.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.intake.ocr_classifier.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.intake.ocr_classifier.chat_with_vision", return_value=vision_payload):
+        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_partial", "bank_stmt")
+        resp = app_client.post(f"/api/intake/upload/{bank_doc}/classify", headers=auth_headers)
+
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert "autofired_letter" not in body  # nothing fired — only 1 of 3 required docs
+
+
+def test_classify_skips_autofire_when_recent_letter_exists(app_client, auth_headers, stub_s3):
+    """Classifying after a letter was just sent for the app should report 'letter_already_sent'."""
+    from shared.db import get_conn, insert
+    _seed_prequal_and_app("app_dedup", "pq_dedup")
+
+    # Pre-seed a recent letter row (issued just now so dedup blocks the new fire)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        insert(conn, "prequal_letters", {
+            "letter_id":          "pql_recent",
+            "prequal_id":         "pq_dedup",
+            "application_id":     "app_dedup",
+            "borrower_name":      "Maya",
+            "borrower_email":     "maya@example.com",
+            "max_pp_low":         60000,
+            "max_pp_high":        80000,
+            "liquid_assets":      25000,
+            "monthly_rent_used":  900,
+            "rate_low_pct":       5.875,
+            "rate_high_pct":      8.0,
+            "down_pct_low":       20.0,
+            "issued_at":          now,
+            "expires_at":         now,
+            "zap_fired":          1,
+            "sent_to":            "maya@example.com",
+            "breakdown":          "{}",
+            "created_at":         now,
+        })
+
+    vision_payload = '{"doc_type": "bank_stmt", "confidence": 0.9, "extracted_fields": {}, "warnings": []}'
+    with patch("loan_officer.intake.upload.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.intake.ocr_classifier.get_default_client", return_value=stub_s3), \
+         patch("loan_officer.intake.ocr_classifier.chat_with_vision", return_value=vision_payload):
+        _upload_classified_doc(app_client, auth_headers, stub_s3, "app_dedup", "rent_roll")
+        _upload_classified_doc(app_client, auth_headers, stub_s3, "app_dedup", "purchase_contract")
+        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_dedup", "bank_stmt")
+        resp = app_client.post(f"/api/intake/upload/{bank_doc}/classify", headers=auth_headers)
+
+    body = resp.get_json()
+    assert "autofired_letter" in body
+    assert body["autofired_letter"]["skipped"].startswith("letter_already_sent")
+
+
 def test_completeness_falls_back_to_declared_doc_type(app_client, auth_headers, stub_s3):
     """Unclassified docs still count via declared_doc_type."""
     with patch("loan_officer.intake.upload.get_default_client", return_value=stub_s3):

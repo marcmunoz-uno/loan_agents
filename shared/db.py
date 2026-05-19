@@ -50,7 +50,32 @@ def init_db() -> None:
                 raise FileNotFoundError(f"Migration file not found: {path}")
             sql = path.read_text()
             conn.executescript(sql)
+        _apply_schema_patches(conn)
         conn.commit()
+
+
+def _apply_schema_patches(conn: sqlite3.Connection) -> None:
+    """
+    In-place ALTER TABLE patches for columns added to existing tables.
+
+    The .sql migration files are the source-of-truth for *fresh* DBs; this
+    function is what makes the schema converge for DBs that were created
+    before a column was added (e.g. Render's persistent disk between deploys).
+    Idempotent — checks PRAGMA table_info before each ALTER.
+    """
+    additions = {
+        "prequal_letters": [
+            ("pdf_url",            "TEXT DEFAULT ''"),
+            ("pdf_url_expires_at", "TEXT DEFAULT ''"),
+        ],
+    }
+    for table, cols in additions.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if not existing:
+            continue  # table doesn't exist yet — earlier migration handles it
+        for col_name, col_def in cols:
+            if col_name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
 
 
 def fetchone(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Optional[dict]:
