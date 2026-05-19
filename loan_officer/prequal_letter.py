@@ -340,9 +340,13 @@ def _coerce_money(value: Any) -> Optional[float]:
 # ── PDF rendering (reportlab) ────────────────────────────────────────────────
 
 DEFAULT_SIGNER = {
-    "firm_name": os.environ.get("LO_FIRM_NAME", "Munoz, Ghezlan & Co., Ltd."),
+    "firm_name": os.environ.get("LO_FIRM_NAME", "MUNOZ, GHEZLAN & CO., LTD."),
+    "firm_short_name": os.environ.get("LO_FIRM_SHORT_NAME", "Munoz & Co. Ltd"),
     "firm_address_line_1": os.environ.get("LO_FIRM_ADDR_1", "99 Wall Street, Suite 4041"),
-    "firm_address_line_2": os.environ.get("LO_FIRM_ADDR_2", "New York, NY 10005"),
+    "firm_address_line_2": os.environ.get("LO_FIRM_ADDR_2", "New York, NY, 10005"),
+    "firm_domain": os.environ.get("LO_FIRM_DOMAIN", "Munoz.Ltd"),
+    "firm_cta_text": os.environ.get("LO_FIRM_CTA_TEXT", "Book a Call"),
+    "firm_cta_url":  os.environ.get("LO_FIRM_CTA_URL", "https://munoz.ltd"),
     "lo_name": os.environ.get("LO_SIGNER_NAME", "Marc Munoz"),
     "lo_title": os.environ.get("LO_SIGNER_TITLE", "Senior Loan Officer"),
     "lo_email": os.environ.get("LO_SIGNER_EMAIL", "marc@munoz.ltd"),
@@ -355,7 +359,7 @@ LETTER_VALIDITY_DAYS = 90
 def render_letter_pdf(
     *,
     borrower_name: str,
-    borrower_email: str,
+    borrower_email: str,                     # unused in current template; kept for signature compat
     max_pp_low: float,
     max_pp_high: float,
     rate_low_pct: float = 5.875,
@@ -365,137 +369,134 @@ def render_letter_pdf(
     signer: Optional[dict[str, str]] = None,
 ) -> bytes:
     """
-    Render the pre-qualification letter as a PDF.
-    Returns the raw bytes; storage is the caller's concern.
+    Render the pre-qualification letter as a PDF matching the
+    Munoz, Ghezlan & Co., Ltd. template (verbatim wording, label:value
+    header, bulleted conditions, expiration + footer line).
     """
     from reportlab.lib.pagesizes import LETTER
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle,
-    )
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
     from reportlab.lib import colors
 
-    signer = signer or DEFAULT_SIGNER
+    # Merge caller overrides over defaults so partial signer dicts still work.
+    signer = {**DEFAULT_SIGNER, **(signer or {})}
     issued_at = issued_at or datetime.now(timezone.utc)
-    expires_at = issued_at + timedelta(days=LETTER_VALIDITY_DAYS)
 
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=LETTER,
-        leftMargin=0.9 * inch, rightMargin=0.9 * inch,
-        topMargin=0.9 * inch, bottomMargin=0.9 * inch,
+        leftMargin=1.0 * inch, rightMargin=1.0 * inch,
+        topMargin=1.0 * inch, bottomMargin=0.8 * inch,
     )
 
     styles = getSampleStyleSheet()
+    title_firm = ParagraphStyle(
+        "TitleFirm", parent=styles["Heading1"], fontName="Helvetica-Bold",
+        fontSize=14, leading=18, alignment=1, spaceAfter=2,
+        textColor=colors.HexColor("#111"),
+    )
+    title_sub = ParagraphStyle(
+        "TitleSub", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=12, leading=16, alignment=1, spaceAfter=4,
+        textColor=colors.HexColor("#111"),
+    )
     body = ParagraphStyle(
-        "Body", parent=styles["Normal"], fontSize=10.5, leading=15, spaceAfter=8,
+        "Body", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=11, leading=15, spaceAfter=10,
     )
-    small = ParagraphStyle(
-        "Small", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=colors.HexColor("#444"),
+    bullet = ParagraphStyle(
+        "Bullet", parent=body, leftIndent=18, bulletIndent=6, spaceAfter=4,
     )
-    head = ParagraphStyle(
-        "Head", parent=styles["Heading2"], fontSize=11, leading=14, spaceAfter=4,
-        textColor=colors.HexColor("#222"),
+    footer_line = ParagraphStyle(
+        "Footer", parent=body, fontSize=9, leading=12, alignment=1,
+        textColor=colors.HexColor("#444"), spaceBefore=4,
     )
-    firm = ParagraphStyle(
-        "Firm", parent=styles["Heading1"], fontSize=14, leading=16, spaceAfter=2,
-        textColor=colors.HexColor("#111"), alignment=1,
+
+    money = lambda v: f"${v:,.0f}"
+    rate_fmt = lambda v: f"{v:g}%"          # trim trailing zeros
+    max_pp_str = (
+        money(max_pp_low) if max_pp_low == max_pp_high
+        else f"{money(max_pp_low)} – {money(max_pp_high)}"
     )
 
     story = []
 
-    # Letterhead (centered)
-    story.append(Paragraph(signer["firm_name"], firm))
-    story.append(Paragraph(signer["firm_address_line_1"], ParagraphStyle(
-        "FirmAddr", parent=small, alignment=1,
-    )))
-    story.append(Paragraph(signer["firm_address_line_2"], ParagraphStyle(
-        "FirmAddr2", parent=small, alignment=1,
-    )))
-    story.append(Spacer(1, 0.35 * inch))
+    # ── Title block (top-centered, two lines) ────────────────────────────────
+    story.append(Paragraph(signer["firm_name"], title_firm))
+    story.append(Paragraph("PRE-QUALIFICATION RESULTS", title_sub))
+    story.append(Spacer(1, 0.45 * inch))
 
-    # Date + recipient
-    story.append(Paragraph(issued_at.strftime("%m/%d/%Y"), body))
-    story.append(Spacer(1, 0.15 * inch))
-    story.append(Paragraph(borrower_name, body))
-    if borrower_email:
-        story.append(Paragraph(borrower_email, body))
-    story.append(Spacer(1, 0.2 * inch))
-
-    # Subject
-    story.append(Paragraph("<b>Re: Mortgage Pre-Qualification — Non-QM DSCR Loan</b>", body))
-    story.append(Spacer(1, 0.15 * inch))
-
-    # Opening
-    story.append(Paragraph(f"Dear {borrower_name},", body))
-    story.append(Paragraph(
-        "Based on our review of the financial documentation you provided, "
-        "you are pre-qualified for a Non-QM DSCR Loan under the following parameters:",
-        body,
-    ))
+    # ── Label:value header (DATE, TO, SUBJECT, RE) ───────────────────────────
+    story.append(Paragraph(f"<b>DATE:</b> {issued_at.strftime('%m/%d/%Y')}", body))
+    story.append(Paragraph(f"<b>TO:</b> {borrower_name}", body))
+    story.append(Paragraph("<b>SUBJECT:</b> Purchase Financing", body))
+    story.append(Paragraph("<b>RE:</b> PURCHASE LOAN PRE-QUALIFICATION", body))
     story.append(Spacer(1, 0.1 * inch))
 
-    # Key terms table
-    money = lambda v: f"${v:,.0f}"
-    pct = lambda v: f"{v:.3f}%".rstrip("0").rstrip(".") + "%"
-    terms_data = [
-        ["Maximum Purchase Price",  f"{money(max_pp_low)} – {money(max_pp_high)}"],
-        ["Minimum Down Payment",    f"{down_pct_low:.0f}%"],
-        ["Interest Rate Range",     f"{rate_low_pct:.3f}% – {rate_high_pct:.3f}%"],
+    # ── Opening paragraph ────────────────────────────────────────────────────
+    story.append(Paragraph(
+        "After review of your preliminary Non-QM DSCR loan request and based on the "
+        "information you have provided to us, we are pleased to advise you that you have "
+        "been conditionally pre-qualified for a Non-QM DSCR mortgage loan.",
+        body,
+    ))
+
+    # ── Conditions (bulleted) ────────────────────────────────────────────────
+    story.append(Paragraph("This Pre-Qualification is subject to the following conditions:", body))
+    conditions = [
+        f"Maximum Purchase Price of {max_pp_str}",
+        "Review and approval of title report on the subject property.",
+        "Review and approval of appraisal to be at or greater than sales price.",
+        f"Down Payment of {down_pct_low:g}%.",
+        f"Interest rates ranging from {rate_fmt(rate_low_pct)} to {rate_fmt(rate_high_pct)}.",
+        "Subject to loan program availability.",
     ]
-    tbl = Table(terms_data, colWidths=[2.4 * inch, 3.2 * inch], hAlign="LEFT")
-    tbl.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 10.5),
-        ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#222")),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ("LINEABOVE", (0, 0), (-1, 0), 0.75, colors.HexColor("#888")),
-        ("LINEBELOW", (0, -1), (-1, -1), 0.75, colors.HexColor("#888")),
-        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-    ]))
-    story.append(tbl)
-    story.append(Spacer(1, 0.2 * inch))
+    for c in conditions:
+        story.append(Paragraph(c, bullet, bulletText="•"))
+    story.append(Spacer(1, 0.05 * inch))
 
-    # Conditions
-    story.append(Paragraph("<b>This pre-qualification is subject to:</b>", body))
-    for c in [
-        "Satisfactory title report on the subject property",
-        "Appraisal supporting the purchase price and projected rental income",
-        "Final loan-program availability at the time of application",
-    ]:
-        story.append(Paragraph(f"• {c}", body))
+    # ── Material-change / disclosures (single paragraph) ─────────────────────
+    story.append(Paragraph(
+        "It is important to note that, should your financial, employment, or credit "
+        "standing change, this Pre-Qualification will be subject to re-qualifying and "
+        "verification. Any material omission or misrepresentation in your loan application "
+        "may void this Pre-Qualification. This Pre-Qualification is not a commitment to lend.",
+        body,
+    ))
+
+    # ── Third-party closing paragraph ────────────────────────────────────────
+    story.append(Paragraph(
+        f"If any interested third parties have any questions pertaining to this letter, "
+        f"please feel free to contact the number listed below. Thank you for allowing "
+        f"{signer['firm_short_name']} to be of service to you.",
+        body,
+    ))
+
+    # ── Signature block ──────────────────────────────────────────────────────
+    story.append(Paragraph("Sincerely,", body))
     story.append(Spacer(1, 0.15 * inch))
-
-    # Disclaimers
-    story.append(Paragraph("<b>Important Disclosures</b>", head))
-    story.append(Paragraph(
-        "This Pre-Qualification is not a commitment to lend. Any material change "
-        "in your financial or employment status will require re-qualification. "
-        "Any material omission or misrepresentation in your loan application may "
-        "void this Pre-Qualification.",
-        body,
-    ))
-    story.append(Paragraph(
-        f"This approval is valid for {LETTER_VALIDITY_DAYS} days from the date of "
-        f"this letter (through {expires_at.strftime('%m/%d/%Y')}). After expiration, "
-        "credit documentation must be resubmitted to extend the pre-qualification.",
-        body,
-    ))
+    story.append(Paragraph(signer["lo_name"], body))
+    story.append(Spacer(1, 0.05 * inch))
+    story.append(Paragraph(signer["lo_title"], body))
+    story.append(Paragraph(f"Email: {signer['lo_email']}", body))
+    story.append(Paragraph(f"Mobile: {signer['lo_phone']}", body))
     story.append(Spacer(1, 0.25 * inch))
 
-    # Sign-off
-    story.append(Paragraph("Please contact me with any questions.", body))
-    story.append(Spacer(1, 0.15 * inch))
-    story.append(Paragraph("Sincerely,", body))
-    story.append(Spacer(1, 0.3 * inch))
-    story.append(Paragraph(f"<b>{signer['lo_name']}</b>", body))
-    story.append(Paragraph(signer["lo_title"], body))
-    story.append(Paragraph(signer["lo_email"], body))
-    story.append(Paragraph(signer["lo_phone"], body))
+    # ── Expiration + footer ──────────────────────────────────────────────────
+    story.append(Paragraph(
+        f"<b>EXPIRATION:</b> This approval expires {LETTER_VALIDITY_DAYS} days from the "
+        f"date of this letter. Credit documentation needs to be resubmitted for approval "
+        f"extension.",
+        body,
+    ))
+    footer = (
+        f"{signer['firm_short_name']}  -  "
+        f"{signer['firm_address_line_1']},  {signer['firm_address_line_2']}  -  "
+        f"{signer['firm_domain']}  -  "
+        f'<a href="{signer["firm_cta_url"]}">{signer["firm_cta_text"]}</a>'
+    )
+    story.append(Paragraph(footer, footer_line))
 
     doc.build(story)
     return buf.getvalue()
@@ -838,43 +839,71 @@ def _render_email_html(
     expires_at: datetime,
     pdf_url: str,
 ) -> str:
+    """HTML email body — mirrors the Munoz, Ghezlan & Co. PDF template verbatim
+    so the inline body and the attached PDF read identically."""
     money = lambda v: f"${v:,.0f}"
-    attachment_block = ""
-    if pdf_url:
-        attachment_block = (
-            f'<p style="margin-top:16px;"><b>Your letter PDF:</b> '
-            f'<a href="{pdf_url}">Download</a> '
-            f'(valid for 7 days)</p>'
-        )
+    rate = lambda v: f"{v:g}%"
+    max_pp_str = (
+        money(max_pp_low) if max_pp_low == max_pp_high
+        else f"{money(max_pp_low)} – {money(max_pp_high)}"
+    )
+
+    sig = DEFAULT_SIGNER
     return f"""\
-<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;color:#222;line-height:1.5;">
-  <div style="text-align:center;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:24px;">
-    <div style="font-size:18px;font-weight:bold;">{DEFAULT_SIGNER['firm_name']}</div>
-    <div style="font-size:11px;color:#666;">{DEFAULT_SIGNER['firm_address_line_1']} • {DEFAULT_SIGNER['firm_address_line_2']}</div>
+<div style="font-family:Georgia,serif;max-width:640px;margin:0 auto;color:#222;line-height:1.55;">
+  <div style="text-align:center;margin-bottom:32px;">
+    <div style="font-size:16px;font-weight:bold;">{sig['firm_name']}</div>
+    <div style="font-size:14px;font-weight:bold;">PRE-QUALIFICATION RESULTS</div>
   </div>
-  <p style="font-size:12px;color:#666;">{issued_at.strftime('%m/%d/%Y')}</p>
-  <p>{borrower_name}<br>{borrower_email}</p>
-  <p><b>Re: Mortgage Pre-Qualification — Non-QM DSCR Loan</b></p>
-  <p>Dear {borrower_name},</p>
-  <p>Based on our review of the financial documentation you provided, you are pre-qualified for a Non-QM DSCR Loan under the following parameters:</p>
-  <table style="border-top:1px solid #888;border-bottom:1px solid #888;border-collapse:collapse;width:100%;margin:12px 0;">
-    <tr><td style="padding:6px 4px;font-weight:bold;width:55%;">Maximum Purchase Price</td><td style="padding:6px 4px;">{money(max_pp_low)} – {money(max_pp_high)}</td></tr>
-    <tr><td style="padding:6px 4px;font-weight:bold;">Minimum Down Payment</td><td style="padding:6px 4px;">20%</td></tr>
-    <tr><td style="padding:6px 4px;font-weight:bold;">Interest Rate Range</td><td style="padding:6px 4px;">5.875% – 8.000%</td></tr>
-  </table>
-  <p><b>This pre-qualification is subject to:</b></p>
+
+  <p><b>DATE:</b> {issued_at.strftime('%m/%d/%Y')}</p>
+  <p><b>TO:</b> {borrower_name}</p>
+  <p><b>SUBJECT:</b> Purchase Financing</p>
+  <p><b>RE:</b> PURCHASE LOAN PRE-QUALIFICATION</p>
+
+  <p>After review of your preliminary Non-QM DSCR loan request and based on the
+  information you have provided to us, we are pleased to advise you that you have
+  been conditionally pre-qualified for a Non-QM DSCR mortgage loan.</p>
+
+  <p>This Pre-Qualification is subject to the following conditions:</p>
   <ul>
-    <li>Satisfactory title report on the subject property</li>
-    <li>Appraisal supporting the purchase price and projected rental income</li>
-    <li>Final loan-program availability at the time of application</li>
+    <li>Maximum Purchase Price of {max_pp_str}</li>
+    <li>Review and approval of title report on the subject property.</li>
+    <li>Review and approval of appraisal to be at or greater than sales price.</li>
+    <li>Down Payment of 20%.</li>
+    <li>Interest rates ranging from {rate(5.875)} to {rate(8.0)}.</li>
+    <li>Subject to loan program availability.</li>
   </ul>
-  {attachment_block}
-  <h4 style="margin-top:24px;margin-bottom:6px;">Important Disclosures</h4>
-  <p style="font-size:11px;color:#444;">This Pre-Qualification is not a commitment to lend. Any material change in your financial or employment status will require re-qualification. Any material omission or misrepresentation in your loan application may void this Pre-Qualification.</p>
-  <p style="font-size:11px;color:#444;">This approval is valid for {LETTER_VALIDITY_DAYS} days from the date of this letter (through {expires_at.strftime('%m/%d/%Y')}). After expiration, credit documentation must be resubmitted to extend the pre-qualification.</p>
-  <p style="margin-top:24px;">Please contact me with any questions.</p>
+
+  <p>It is important to note that, should your financial, employment, or credit
+  standing change, this Pre-Qualification will be subject to re-qualifying and
+  verification. Any material omission or misrepresentation in your loan application
+  may void this Pre-Qualification. This Pre-Qualification is not a commitment to lend.</p>
+
+  <p>If any interested third parties have any questions pertaining to this letter,
+  please feel free to contact the number listed below. Thank you for allowing
+  {sig['firm_short_name']} to be of service to you.</p>
+
   <p>Sincerely,</p>
-  <p><b>{DEFAULT_SIGNER['lo_name']}</b><br>{DEFAULT_SIGNER['lo_title']}<br>{DEFAULT_SIGNER['lo_email']}<br>{DEFAULT_SIGNER['lo_phone']}</p>
+
+  <p>{sig['lo_name']}</p>
+
+  <p style="margin-bottom:24px;">
+    {sig['lo_title']}<br>
+    Email: <a href="mailto:{sig['lo_email']}">{sig['lo_email']}</a><br>
+    Mobile: {sig['lo_phone']}
+  </p>
+
+  <p><b>EXPIRATION:</b> This approval expires {LETTER_VALIDITY_DAYS} days from the
+  date of this letter. Credit documentation needs to be resubmitted for approval
+  extension.</p>
+
+  <hr style="border:none;border-top:1px solid #ddd;margin:24px 0 12px;">
+  <p style="font-size:11px;color:#666;text-align:center;">
+    {sig['firm_short_name']} &nbsp;-&nbsp; {sig['firm_address_line_1']}, {sig['firm_address_line_2']}
+    &nbsp;-&nbsp; {sig['firm_domain']}
+    &nbsp;-&nbsp; <a href="{sig['firm_cta_url']}">{sig['firm_cta_text']}</a>
+  </p>
 </div>"""
 
 
