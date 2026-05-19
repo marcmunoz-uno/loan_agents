@@ -54,6 +54,8 @@ services:
         value: https://loan-agents.onrender.com
       - key: DEAL_FLOW_URL
         value: https://tranchi-deal-flow-agents.onrender.com
+      - key: LOAN_APPLICATION_URL
+        value: https://2589631.my1003app.com/0/register
       - key: ZAPIER_INBOUND_SECRET
         sync: false
     disk:

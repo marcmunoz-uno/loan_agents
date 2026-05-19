@@ -141,9 +141,9 @@ def classify(doc_id: str):
         if tx_result:
             response["autofired_transaction"] = tx_result
 
-        arive_result = _maybe_create_arive_loan(doc_id, result.extracted_fields)
-        if arive_result:
-            response["autofired_arive_loan"] = arive_result
+        invite_result = _maybe_send_loan_app_invitation(doc_id, result.extracted_fields)
+        if invite_result:
+            response["autofired_loan_app_invitation"] = invite_result
 
     return jsonify(response)
 
@@ -372,27 +372,27 @@ def _maybe_open_transaction(doc_id: str, extracted_fields: dict[str, Any]) -> Op
     return {"tx_id": tx_id, "deal_flow_status": result.get("status"), "psa_terms": psa}
 
 
-def _maybe_create_arive_loan(doc_id: str, extracted_fields: dict[str, Any]) -> Optional[dict[str, Any]]:
+def _maybe_send_loan_app_invitation(doc_id: str, extracted_fields: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
-    Fire arive.create_loan on a purchase_contract classification. Arive's
-    standard workflow then sends the borrower an invitation to fill out
-    the 1003 in their POS portal — closing the "PSA received → 1003 sent"
-    gap that previously required manual LO action.
+    Email the borrower their 1003 registration link after a PSA arrives.
 
-    Idempotency: if intake_documents already has _arive_loan_id stamped on
-    this doc, skip.
+    The Munoz firm uses an external POS at https://2589631.my1003app.com/0/register
+    where borrowers self-register + fill out the URLA Form 1003. Once they
+    submit, Arive picks up the application via its standard POS workflow.
+
+    This auto-fires from the PSA classification path so the LO doesn't have
+    to manually send the link. Idempotent — stamps `_loan_app_invitation_sent`
+    on the intake doc so re-classifies don't double-send.
     """
     doc = get_upload_status(doc_id)
     if not doc:
         return None
 
     extra_blob = doc.get("extracted_fields") or {}
-    if isinstance(extra_blob, dict) and extra_blob.get("_arive_loan_id"):
-        return {"skipped": f"arive_loan_already_created:{extra_blob['_arive_loan_id']}"}
-    if isinstance(extra_blob, dict) and extra_blob.get("_arive_skipped"):
-        return {"skipped": extra_blob["_arive_skipped"]}
+    if isinstance(extra_blob, dict) and extra_blob.get("_loan_app_invitation_sent"):
+        return {"skipped": f"invitation_already_sent:{extra_blob['_loan_app_invitation_sent']}"}
 
-    # Resolve borrower prequal
+    # Resolve the borrower's prequal
     user_id = doc.get("user_id") or ""
     app_id = doc.get("application_id") or ""
     prequal_id = ""
@@ -407,8 +407,7 @@ def _maybe_create_arive_loan(doc_id: str, extracted_fields: dict[str, Any]) -> O
     with get_conn() as conn:
         pq_row = fetchone(
             conn,
-            "SELECT id, user_id, borrower_data, property_data, suggested_product "
-            "FROM loan_prequals WHERE id = ?",
+            "SELECT id, borrower_data FROM loan_prequals WHERE id = ?",
             (prequal_id,),
         )
     if not pq_row:
@@ -418,39 +417,32 @@ def _maybe_create_arive_loan(doc_id: str, extracted_fields: dict[str, Any]) -> O
         borrower = json.loads(pq_row.get("borrower_data") or "{}")
     except (TypeError, json.JSONDecodeError):
         borrower = {}
-    try:
-        prop = json.loads(pq_row.get("property_data") or "{}")
-    except (TypeError, json.JSONDecodeError):
-        prop = {}
-    prequal = {
-        "id":            pq_row["id"],
-        "user_id":       pq_row.get("user_id") or user_id,
-        "borrower_data": borrower,
-        "property_data": prop,
-    }
 
-    from loan_officer.arive_create_loan import create_loan_in_arive
-    result = create_loan_in_arive(prequal, extracted_fields, correlation_id=doc_id)
+    borrower_email = (borrower.get("email") or "").strip()
+    borrower_name = borrower.get("name") or "there"
+    if not borrower_email:
+        return {"skipped": "no_borrower_email"}
 
-    # Persist outcome back on the intake row (mirror of the _tx_id pattern)
-    merged = dict(extra_blob) if isinstance(extra_blob, dict) else {}
-    if result.get("arive_loan_id"):
-        merged["_arive_loan_id"] = result["arive_loan_id"]
-    elif result.get("status", "").startswith("skipped:"):
-        merged["_arive_skipped"] = result["status"]
-    if merged != extra_blob:
+    from loan_officer.loan_app_invitation import send_loan_app_invitation
+    result = send_loan_app_invitation(
+        borrower_name=borrower_name,
+        borrower_email=borrower_email,
+        property_address=str(extracted_fields.get("property_address", "")),
+        purchase_price=_coerce_money(extracted_fields.get("purchase_price")),
+        closing_date=str(extracted_fields.get("closing_date", "")),
+        correlation_id=doc_id,
+    )
+
+    if result.get("ok"):
+        merged = dict(extra_blob) if isinstance(extra_blob, dict) else {}
+        merged["_loan_app_invitation_sent"] = datetime.now(timezone.utc).isoformat()
         with get_conn() as conn:
             update(conn, "intake_documents", {
                 "extracted_fields": json.dumps(merged),
                 "updated_at":       datetime.now(timezone.utc).isoformat(),
             }, "doc_id = ?", (doc_id,))
 
-    return {
-        "ok":            result.get("ok", False),
-        "status":        result.get("status", ""),
-        "arive_loan_id": result.get("arive_loan_id", ""),
-        "params_sent":   result.get("params_sent", {}),
-    }
+    return result
 
 
 def _coerce_money(value: Any) -> Optional[float]:
@@ -784,9 +776,9 @@ def inbound_email_attachment():
         if tx_result:
             response["autofired_transaction"] = tx_result
 
-        arive_result = _maybe_create_arive_loan(doc_id, result.extracted_fields)
-        if arive_result:
-            response["autofired_arive_loan"] = arive_result
+        invite_result = _maybe_send_loan_app_invitation(doc_id, result.extracted_fields)
+        if invite_result:
+            response["autofired_loan_app_invitation"] = invite_result
 
     return jsonify(response), 200
 
