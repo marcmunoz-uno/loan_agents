@@ -68,6 +68,10 @@ def _apply_schema_patches(conn: sqlite3.Connection) -> None:
             ("pdf_url",            "TEXT DEFAULT ''"),
             ("pdf_url_expires_at", "TEXT DEFAULT ''"),
         ],
+        "intake_documents": [
+            ("source_message_id",  "TEXT DEFAULT ''"),
+            ("source",             "TEXT DEFAULT ''"),
+        ],
     }
     for table, cols in additions.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}

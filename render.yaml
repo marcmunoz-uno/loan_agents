@@ -52,6 +52,10 @@ services:
         sync: false
       - key: PUBLIC_BASE_URL
         value: https://loan-agents.onrender.com
+      - key: DEAL_FLOW_URL
+        value: https://tranchi-deal-flow-agents.onrender.com
+      - key: ZAPIER_INBOUND_SECRET
+        sync: false
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data

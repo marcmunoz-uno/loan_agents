@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS intake_documents (
     error_message       TEXT DEFAULT '',
     uploaded_at         TEXT DEFAULT '',
     classified_at       TEXT DEFAULT '',
+    source              TEXT DEFAULT '',           -- "inbound_email" | "intake_portal" | etc.
+    source_message_id   TEXT DEFAULT '',           -- Gmail message-id (or equivalent) for dedup
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
