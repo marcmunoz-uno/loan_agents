@@ -30,6 +30,22 @@ services:
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
         sync: false
+      - key: ZAPIER_HOOK_PREQUAL_LETTER_SENT
+        sync: false
+      - key: LO_FIRM_NAME
+        value: "Munoz, Ghezlan & Co., Ltd."
+      - key: LO_FIRM_ADDR_1
+        value: "99 Wall Street, Suite 4041"
+      - key: LO_FIRM_ADDR_2
+        value: "New York, NY 10005"
+      - key: LO_SIGNER_NAME
+        value: "Marc Munoz"
+      - key: LO_SIGNER_TITLE
+        value: "Senior Loan Officer"
+      - key: LO_SIGNER_EMAIL
+        value: "marc@munoz.ltd"
+      - key: LO_SIGNER_PHONE
+        value: "(917) 981-0032"
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data

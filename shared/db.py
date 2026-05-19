@@ -23,6 +23,7 @@ DB_PATH = os.environ.get("DB_PATH", "data/dealflow.db")
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_initial.sql"
 MIGRATION_002_PATH = Path(__file__).parent / "migrations" / "002_loan_processor.sql"
 MIGRATION_003_PATH = Path(__file__).parent / "migrations" / "003_intake.sql"
+MIGRATION_004_PATH = Path(__file__).parent / "migrations" / "004_prequal_letters.sql"
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -42,7 +43,7 @@ def get_conn() -> sqlite3.Connection:
 
 def init_db() -> None:
     """Run all migrations in order. Safe to call multiple times (CREATE IF NOT EXISTS)."""
-    migrations = [MIGRATION_PATH, MIGRATION_002_PATH, MIGRATION_003_PATH]
+    migrations = [MIGRATION_PATH, MIGRATION_002_PATH, MIGRATION_003_PATH, MIGRATION_004_PATH]
     with get_conn() as conn:
         for path in migrations:
             if not path.exists():

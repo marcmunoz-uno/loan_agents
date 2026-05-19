@@ -674,3 +674,82 @@ def loan_chat():
         "reply": reply,
         "agent": "Tranchi - Loan Officer",
     })
+
+
+# ── POST /api/loan/prequal-letter/<prequal_id> ────────────────────────────────
+
+@loan_bp.route("/prequal-letter/<prequal_id>", methods=["POST"])
+@require_tranchi_auth
+def generate_prequal_letter(prequal_id: str):
+    """
+    Auto-generate the pre-qualification letter for a prequal.
+
+    Liquidity is summed from classified bank_stmt rows in intake_documents
+    (falls back to borrower self-reported liquidity, or to an `liquid_assets`
+    override in the request body for LO manual control).
+
+    Side effects:
+      • Writes a `prequal_letters` audit row
+      • Fires `prequal_letter_sent` Zapier hook (Gmail send + attachment)
+        if borrower email is present and `skip_send` is not set
+
+    Returns the inline base64 PDF + the computed range + breakdown.
+    """
+    from loan_officer.prequal_letter import generate_and_send
+
+    body = request.get_json(silent=True) or {}
+    try:
+        result = generate_and_send(
+            prequal_id,
+            liquid_assets_override=(
+                float(body["liquid_assets"]) if "liquid_assets" in body else None
+            ),
+            monthly_rent_override=(
+                float(body["monthly_rent"]) if "monthly_rent" in body else None
+            ),
+            skip_send=bool(body.get("skip_send", False)),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": f"letter generation failed: {e}"}), 500
+
+    return jsonify({
+        "letter_id":         result.letter_id,
+        "prequal_id":        result.prequal_id,
+        "application_id":    result.application_id,
+        "borrower_name":     result.borrower_name,
+        "borrower_email":    result.borrower_email,
+        "max_pp_low":        result.max_pp_low,
+        "max_pp_high":       result.max_pp_high,
+        "rate_low_pct":      result.rate_low_pct,
+        "rate_high_pct":     result.rate_high_pct,
+        "down_pct_low":      result.down_pct_low,
+        "liquid_assets":     result.liquid_assets,
+        "monthly_rent_used": result.monthly_rent_used,
+        "issued_at":         result.issued_at,
+        "expires_at":        result.expires_at,
+        "zap_fired":         result.zap_fired,
+        "sent_to":           result.sent_to,
+        "pdf_base64":        result.pdf_base64,
+        "breakdown":         result.breakdown,
+    })
+
+
+# ── GET /api/loan/prequal-letter/<letter_id> ──────────────────────────────────
+
+@loan_bp.route("/prequal-letter/<letter_id>", methods=["GET"])
+@require_tranchi_auth
+def get_prequal_letter(letter_id: str):
+    """
+    Audit-row read. PDF bytes are not stored; if you need the file again,
+    regenerate via POST (deterministic from the same intake state).
+    """
+    from loan_officer.prequal_letter import get_letter
+
+    if not letter_id.startswith("pql_"):
+        return jsonify({"error": "letter_id must start with 'pql_'"}), 400
+    row = get_letter(letter_id)
+    if row is None:
+        return jsonify({"error": "letter not found"}), 404
+    return jsonify(row)

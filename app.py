@@ -56,10 +56,12 @@ def create_app() -> Flask:
             "endpoints": {
                 "health": "GET /health",
                 "loan_officer": {
-                    "prequal": "POST /api/loan/prequal",
-                    "application": "POST /api/loan/application",
-                    "chat": "POST /api/loan/chat",
-                    "arive_webhook": "POST /api/loan/webhook/arive-update",
+                    "prequal":         "POST /api/loan/prequal",
+                    "application":     "POST /api/loan/application",
+                    "chat":            "POST /api/loan/chat",
+                    "prequal_letter":  "POST /api/loan/prequal-letter/<prequal_id>",
+                    "letter_audit":    "GET  /api/loan/prequal-letter/<letter_id>",
+                    "arive_webhook":   "POST /api/loan/webhook/arive-update",
                 },
                 "loan_processor": {
                     "pre_underwrite": "POST /api/processor/pre-underwrite/<app_id>",
