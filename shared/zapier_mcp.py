@@ -14,15 +14,18 @@ QuickBooks). User-side actions (the borrower's own Gmail/Calendar/etc.) go
 through per-user OAuth in the production UI repo, NOT this client.
 
 Configuration:
-    ZAPIER_MCP_ENDPOINT  — full https URL of the Tranchi MCP endpoint, typically
-                           ending in /sse (e.g. https://mcp.zapier.com/api/v1/mcp/<id>/sse).
-                           Zapier embeds auth in the URL path for some plans;
-                           ZAPIER_MCP_API_KEY is sent as Bearer for those that don't.
-    ZAPIER_MCP_API_KEY   — optional bearer token sent in the Authorization header.
+    ZAPIER_MCP_ENDPOINT  — full https URL of the Tranchi MCP endpoint.
+                           Zapier's modern format is the connect URL with the
+                           auth embedded as a `?token=` query param, e.g.
+                             https://mcp.zapier.com/api/v1/connect?token=<b64>
+                           Legacy format ends in `/sse`. Both are supported.
+    ZAPIER_MCP_API_KEY   — optional bearer token sent in the Authorization
+                           header for plans that don't use URL-embedded auth.
 
-Transport: MCP over SSE via the official `mcp` Python SDK. The SDK is async,
-so each call opens a session, runs the tool, and closes — fine for the
-chat-turn-time call rate. If call volume grows, pool sessions.
+Transport: streamable HTTP (single POST endpoint with SSE response) is the
+default; legacy SSE (two-endpoint pattern) is detected from URLs ending in
+`/sse` and used as a fallback. Each call opens a session, runs the tool,
+closes — fine for the chat-turn-time call rate.
 """
 
 from __future__ import annotations
@@ -126,21 +129,46 @@ class ZapierMCPClient:
     async def _call_async(self, meta_tool: str, args: dict[str, Any]) -> dict[str, Any]:
         # Import inside the function so the rest of the module loads even if
         # mcp isn't installed yet (e.g. dev environments without the dep).
-        from mcp.client.sse import sse_client
         from mcp.client.session import ClientSession
 
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        async def _run() -> dict[str, Any]:
-            async with sse_client(url=self.endpoint, headers=headers) as streams:
-                async with ClientSession(*streams) as session:
-                    await session.initialize()
-                    result = await session.call_tool(meta_tool, args)
-                    return _unwrap(result)
+        use_sse_legacy = self.endpoint.rstrip("/").endswith("/sse")
 
-        return await asyncio.wait_for(_run(), timeout=self.timeout_s)
+        async def _run() -> dict[str, Any]:
+            if use_sse_legacy:
+                # Legacy two-endpoint SSE transport
+                from mcp.client.sse import sse_client
+                async with sse_client(url=self.endpoint, headers=headers) as streams:
+                    async with ClientSession(*streams) as session:
+                        await session.initialize()
+                        result = await session.call_tool(meta_tool, args)
+                        return _unwrap(result)
+            else:
+                # Modern single-endpoint streamable HTTP (POST + SSE response)
+                from mcp.client.streamable_http import streamablehttp_client
+                async with streamablehttp_client(url=self.endpoint, headers=headers) as (read, write, _get_session_id):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        result = await session.call_tool(meta_tool, args)
+                        return _unwrap(result)
+
+        try:
+            return await asyncio.wait_for(_run(), timeout=self.timeout_s)
+        except BaseExceptionGroup as eg:  # asyncio.TaskGroup wraps the real error
+            inner = _first_real_exception(eg)
+            raise RuntimeError(
+                f"{type(inner).__name__}: {inner}"
+            ) from inner
+
+
+def _first_real_exception(eg: BaseException) -> BaseException:
+    """Walk a BaseExceptionGroup tree and return the first leaf exception."""
+    if isinstance(eg, BaseExceptionGroup) and eg.exceptions:
+        return _first_real_exception(eg.exceptions[0])
+    return eg
 
 
 def _unwrap(result: Any) -> dict[str, Any]:
