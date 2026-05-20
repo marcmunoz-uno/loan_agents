@@ -7,6 +7,7 @@ All endpoints require Bearer auth matching TRANCHI_API_SECRET.
 from __future__ import annotations
 import json
 import uuid
+from typing import Any, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 from flask import Blueprint, request, jsonify, Response
@@ -127,7 +128,30 @@ def create_prequal():
     arive_payload = to_arive_format(row, correlation_id=prequal_id)
     fire_zap("prequal_created", arive_payload, correlation_id=prequal_id)
 
-    return jsonify({
+    # ── Auto-fire the prequal letter ──────────────────────────────────────────
+    # Default on; disabled by setting LO_AUTO_FIRE_PREQUAL_LETTER=0/false on Render,
+    # or per-request by passing {"skip_letter": true} in the body. Failure of the
+    # letter pipeline never kills the prequal — we still return the scored prequal
+    # to the caller and surface the letter outcome under a separate key.
+    autofire_letter: Optional[dict] = None
+    if not bool(body.get("skip_letter", False)) and _auto_fire_prequal_letter_enabled():
+        try:
+            from loan_officer.prequal_letter import generate_and_send
+            result = generate_and_send(prequal_id)
+            autofire_letter = {
+                "letter_id":         result.letter_id,
+                "max_pp_low":        result.max_pp_low,
+                "max_pp_high":       result.max_pp_high,
+                "mcp_send_status":   result.mcp_send_status,
+                "zap_fired":         result.zap_fired,
+                "sent_to":           result.sent_to,
+                "pdf_url":           result.pdf_url,
+            }
+        except Exception as e:
+            print(f"[create_prequal] auto-fire letter failed: {e}")
+            autofire_letter = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    response_body = {
         "prequal_id": prequal_id,
         "status": "scored",
         "score": fit_score,
@@ -142,7 +166,17 @@ def create_prequal():
         "next_steps": next_steps,
         "alternatives": routing["alternatives"],
         "created_at": now,
-    }), 201
+    }
+    if autofire_letter is not None:
+        response_body["autofired_letter"] = autofire_letter
+    return jsonify(response_body), 201
+
+
+def _auto_fire_prequal_letter_enabled() -> bool:
+    """Default True; switch off with LO_AUTO_FIRE_PREQUAL_LETTER=0/false/no on Render."""
+    import os
+    val = os.environ.get("LO_AUTO_FIRE_PREQUAL_LETTER", "1").strip().lower()
+    return val not in ("0", "false", "no", "off", "")
 
 
 # ── GET /api/loan/prequal/<prequal_id> ────────────────────────────────────────
@@ -550,22 +584,40 @@ def lender_webhook():
 @verify_webhook(secret_env="ARIVE_WEBHOOK_SECRET", header_name="X-Arive-Signature")
 def arive_webhook():
     """
-    Arive LOS pushes status updates via Zapier to this endpoint.
+    Arive LOS pushes lifecycle events here via Zapier. Two event types today:
 
-    Expected body:
-    {
-        "correlation_id": "app_abc123...",   # our application ID or hash
-        "event_type": "status_change",       # Arive event type
-        "status": "Cleared to Close",        # Arive status vocabulary
-        "conditions": ["appraisal required", "..."],
-        "notes": "UW approved with conditions."
-    }
+    1. event_type="new_loan" (Arive "New Loan in ARIVE" trigger):
+       Fires when the borrower self-registers + submits the 1003 on my1003app.
+       Body shape mirrors Arive's loan record:
+         {
+           "event_type": "new_loan",
+           "ariveLoanId": 14746334,
+           "loanBorrower1_firstName": "Marc", "loanBorrower1_lastName": "Munoz",
+           "loanBorrower1_emailAddressText": "marc@munoz.ltd",
+           "crmReferenceId": "pq_abc123",       # echoes back our prequal_id when set
+           "currentLoanStatus_status": "APPLICATION_INTAKE",
+           "deepLinkURL": "https://munoz.myarive.com/app/loans/14746334",
+           ...
+         }
+       We match to a prequal (by crmReferenceId or borrower email), find or
+       create the application, stamp the Arive loan ID on it, advance state.
 
-    We map Arive's status vocabulary to our internal state machine.
-    When Arive is the source of truth (approved/declined/funded), we do NOT
-    fire an outbound Zapier event back — that would create a loop.
+    2. event_type="status_change" (legacy; also the default when type missing):
+       Existing status update flow, keyed by correlation_id == app_id.
     """
     body = request.get_json(force=True) or {}
+    event_type = (body.get("event_type") or "").lower()
+    # Auto-detect type when missing
+    if not event_type:
+        if body.get("ariveLoanId") or body.get("arive_loan_id"):
+            event_type = "new_loan"
+        else:
+            event_type = "status_change"
+
+    if event_type == "new_loan":
+        return _handle_arive_new_loan(body)
+
+    # ── Legacy status_change path ────────────────────────────────────────────
     correlation_id = body.get("correlation_id", "")
     arive_status = body.get("status", "")
     conditions = body.get("conditions", [])
@@ -639,6 +691,194 @@ def arive_webhook():
         "arive_status": arive_status,
         "internal_state": new_state or app["current_state"],
     })
+
+
+# ── Helper: handle Arive new_loan event ───────────────────────────────────────
+
+def _handle_arive_new_loan(body: dict) -> Any:
+    """
+    Borrower just finished 1003 self-registration on my1003app → Arive created
+    the loan file → Zap fires "New Loan in ARIVE" → here.
+
+    Match strategy:
+      1. crmReferenceId → matches our prequal_id when present (only set if WE
+         created the loan via Arive API, which we don't auto-do anymore)
+      2. Borrower email → most-recent prequal with that email
+      3. None matched → 200 with `matched: false` so Zapier doesn't retry
+
+    On match: ensure an application row exists, stamp the Arive loan ID on
+    `lender_ref_id`, transition state to APP_SUBMITTED, write an audit log.
+    """
+    arive_loan_id = str(
+        body.get("ariveLoanId")
+        or body.get("arive_loan_id")
+        or body.get("loan_id")
+        or ""
+    )
+    if not arive_loan_id:
+        return jsonify({"error": "no ariveLoanId / arive_loan_id in body"}), 400
+
+    crm_ref = (body.get("crmReferenceId") or body.get("crm_reference_id") or "").strip()
+    borrower_email = (
+        body.get("loanBorrower1_emailAddressText")
+        or body.get("borrower_email")
+        or ""
+    ).strip().lower()
+    arive_status = body.get("currentLoanStatus_status") or body.get("status") or "APPLICATION_INTAKE"
+    deep_link = body.get("deepLinkURL") or body.get("deep_link_url") or ""
+
+    # ── Match to a prequal ───────────────────────────────────────────────────
+    prequal_id = ""
+    prequal_user_id = ""
+    matched_via = ""
+
+    # 1. crmReferenceId path
+    if crm_ref.startswith("pq_"):
+        with get_conn() as conn:
+            row = fetchone(conn, "SELECT id, user_id FROM loan_prequals WHERE id = ?", (crm_ref,))
+        if row:
+            prequal_id = row["id"]
+            prequal_user_id = row.get("user_id") or ""
+            matched_via = "crm_reference_id"
+
+    # 2. Borrower email path
+    if not prequal_id and borrower_email:
+        with get_conn() as conn:
+            rows = fetchall(
+                conn,
+                "SELECT id, user_id, borrower_data FROM loan_prequals "
+                "WHERE LOWER(borrower_data) LIKE ? "
+                "ORDER BY created_at DESC LIMIT 10",
+                (f'%"email": "{borrower_email}"%',),
+            )
+        for r in rows:
+            try:
+                bd = json.loads(r.get("borrower_data") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                bd = {}
+            if bd.get("email", "").lower() == borrower_email:
+                prequal_id = r["id"]
+                prequal_user_id = r.get("user_id") or ""
+                matched_via = "borrower_email"
+                break
+
+    if not prequal_id:
+        # Don't make Zapier retry — log + 200
+        print(
+            f"[arive_webhook/new_loan] no prequal match for Arive loan "
+            f"{arive_loan_id} (crm_ref={crm_ref!r}, email={borrower_email!r})"
+        )
+        return jsonify({
+            "received":      True,
+            "matched":       False,
+            "reason":        "no prequal found for crm_ref / borrower_email",
+            "arive_loan_id": arive_loan_id,
+        }), 200
+
+    # ── Find or create the application ───────────────────────────────────────
+    now = _now()
+    with get_conn() as conn:
+        app_row = fetchone(
+            conn,
+            "SELECT * FROM loan_applications WHERE prequal_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (prequal_id,),
+        )
+
+    if app_row:
+        app_id = app_row["id"]
+        # Idempotency: if Arive loan already linked, no-op.
+        if (app_row.get("lender_ref_id") or "").strip() == arive_loan_id:
+            return jsonify({
+                "received":       True,
+                "matched":        True,
+                "deduped":        True,
+                "application_id": app_id,
+                "arive_loan_id":  arive_loan_id,
+                "matched_via":    matched_via,
+            }), 200
+        audit_log = parse_audit_log(app_row.get("audit_log") or "[]")
+    else:
+        app_id = f"app_{uuid.uuid4().hex[:14]}"
+        with get_conn() as conn:
+            insert(conn, "loan_applications", {
+                "id":                app_id,
+                "prequal_id":        prequal_id,
+                "user_id":           prequal_user_id,
+                "status":            "APP_STARTED",
+                "current_state":     "APP_STARTED",
+                "lender_partner":    "",
+                "lender_ref_id":     "",
+                "docs_required":     "[]",
+                "docs_received":     "[]",
+                "underwriter_notes": "",
+                "approved_amount":   None,
+                "approved_rate":     None,
+                "approved_term":     None,
+                "conditions":        "[]",
+                "audit_log":         "[]",
+                "created_at":        now,
+                "updated_at":        now,
+            })
+        audit_log = []
+        # re-fetch the fresh row so we have current_state etc.
+        with get_conn() as conn:
+            app_row = fetchone(
+                conn, "SELECT * FROM loan_applications WHERE id = ?", (app_id,)
+            )
+
+    # ── Stamp Arive loan id + advance state ──────────────────────────────────
+    new_state = ARIVE_STATUS_MAP.get(arive_status) or "APP_SUBMITTED"
+    updates: dict = {
+        "lender_ref_id": arive_loan_id,
+        "updated_at":    now,
+    }
+    try:
+        _, audit_log = transition(
+            app_row.get("current_state") or "APP_STARTED",
+            new_state,
+            audit_log,
+            actor="arive_webhook/new_loan",
+            payload={
+                "arive_loan_id":  arive_loan_id,
+                "arive_status":   arive_status,
+                "deep_link":      deep_link,
+                "matched_via":    matched_via,
+            },
+        )
+        updates["current_state"] = new_state
+        updates["status"]        = new_state
+    except ValueError as exc:
+        print(f"[arive_webhook/new_loan] state transition error (continuing): {exc}")
+        audit_log = add_audit_event(
+            audit_log, "arive_new_loan_note",
+            {"arive_loan_id": arive_loan_id, "arive_status": arive_status, "error": str(exc)},
+        )
+
+    updates["audit_log"] = json.dumps(audit_log)
+    with get_conn() as conn:
+        update(conn, "loan_applications", updates, "id = ?", (app_id,))
+        conn.execute(
+            "INSERT INTO loan_audit_log (application_id, event_type, payload, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (app_id, "arive_new_loan", json.dumps(body), now),
+        )
+        conn.commit()
+
+    print(
+        f"[arive_webhook/new_loan] Linked Arive loan {arive_loan_id} → "
+        f"prequal={prequal_id}, application={app_id}, state={new_state}"
+    )
+    return jsonify({
+        "received":       True,
+        "matched":        True,
+        "matched_via":    matched_via,
+        "arive_loan_id":  arive_loan_id,
+        "prequal_id":     prequal_id,
+        "application_id": app_id,
+        "internal_state": new_state,
+        "deep_link":      deep_link,
+    }), 200
 
 
 # ── POST /api/loan/chat ───────────────────────────────────────────────────────

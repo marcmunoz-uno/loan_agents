@@ -61,6 +61,18 @@ ARIVE_STATUS_MAP: dict[str, str] = {
     "Application Submitted":            "APP_SUBMITTED",
     "Processing":                       "APP_SUBMITTED",
     "Ready for Submission":             "APP_SUBMITTED",
+    # Arive's machine-form status codes (emitted by the New Loan trigger)
+    "APPLICATION_INTAKE":               "APP_SUBMITTED",
+    "PROCESSING":                       "APP_SUBMITTED",
+    "DISCLOSURE_SENT":                  "APP_SUBMITTED",
+    "SUBMITTED_TO_UNDERWRITING":        "UNDERWRITING",
+    "CONDITIONAL_APPROVAL":             "CONDITIONS",
+    "SUSPENDED":                        "CONDITIONS",
+    "CLEARED_TO_CLOSE":                 "CLOSING",
+    "FUNDED":                           "FUNDED",
+    "APPROVED":                         "APPROVED",
+    "DECLINED":                         "DECLINED",
+    "WITHDRAWN":                        "DECLINED",
 }
 
 _REQUEST_TIMEOUT = 10  # seconds
