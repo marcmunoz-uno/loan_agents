@@ -27,10 +27,7 @@ def app(monkeypatch):
     tmp_db.close()
     monkeypatch.setenv("DB_PATH", tmp_db.name)
 
-    # Clear any real LLM/Zapier creds so compose_email falls back to template
-    # and send_email returns skipped (no real network calls in tests).
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Clear Zapier creds so send_email returns skipped (no real network calls in tests).
     monkeypatch.delenv("ZAPIER_MCP_ENDPOINT", raising=False)
     monkeypatch.delenv("ZAPIER_MCP_API_KEY", raising=False)
 
