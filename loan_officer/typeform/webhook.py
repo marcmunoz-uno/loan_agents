@@ -132,7 +132,7 @@ def typeform_submit():
         email = {"subject": "", "body": ""}
         send_result = {"ok": False, "error": f"compose failed: {e}"}
     else:
-        send_result = send_email(row.get("email", ""), email["subject"], email["body"])
+        send_result = send_email(row.get("email", ""), email["subject"], email["body"], correlation_id=intake_id)
 
     email_status = "sent" if send_result.get("ok") else ("skipped" if send_result.get("skipped") else "failed")
     with get_conn() as conn:
