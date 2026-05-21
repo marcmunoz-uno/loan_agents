@@ -20,6 +20,7 @@ load_dotenv()
 from shared.db import init_db
 from loan_officer.routes import loan_bp
 from loan_officer.intake.routes import intake_bp
+from loan_officer.typeform.webhook import typeform_webhook_bp
 from loan_processor.routes import processor_bp
 
 
@@ -33,6 +34,7 @@ def create_app() -> Flask:
 
     app.register_blueprint(loan_bp)
     app.register_blueprint(intake_bp)
+    app.register_blueprint(typeform_webhook_bp)
     app.register_blueprint(processor_bp)
 
     @app.route("/health", methods=["GET"])
@@ -63,6 +65,7 @@ def create_app() -> Flask:
                     "letter_audit":     "GET  /api/loan/prequal-letter/<letter_id>",
                     "letter_pdf":       "GET  /api/loan/prequal-letter/<letter_id>/pdf?token=<hmac>&exp=<unix>",
                     "arive_webhook":    "POST /api/loan/webhook/arive-update",
+                    "typeform_webhook": "POST /api/loan/webhook/typeform-submit",
                 },
                 "loan_processor": {
                     "pre_underwrite": "POST /api/processor/pre-underwrite/<app_id>",

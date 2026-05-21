@@ -40,6 +40,7 @@ ZAPIER_WEBHOOKS: dict[str, str] = {
     "declined":                 os.environ.get("ZAPIER_HOOK_DECLINED", ""),
     "funded":                   os.environ.get("ZAPIER_HOOK_FUNDED", ""),
     "prequal_letter_sent":      os.environ.get("ZAPIER_HOOK_PREQUAL_LETTER_SENT", ""),
+    "borrower_intake_created":  os.environ.get("ZAPIER_HOOK_BORROWER_INTAKE_CREATED", ""),
 }
 
 # Arive status vocabulary → our internal state
