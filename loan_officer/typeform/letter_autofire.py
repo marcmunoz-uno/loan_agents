@@ -32,6 +32,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -197,8 +198,19 @@ def _ocr_asset_statements(urls: list[str]) -> tuple[float, list[dict[str, Any]]]
 def _download(url: str) -> tuple[bytes, str]:
     """
     Fetch the file. Returns (bytes, media_type). Raises on network / size errors.
+
+    Typeform file_url answers point at `api.typeform.com/responses/files/...`
+    which requires a Personal Access Token. We inject the Bearer header when
+    the URL host is Typeform's API; other hosts (public CDN, S3, etc.) get
+    no auth.
     """
-    resp = requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True)
+    headers: dict[str, str] = {}
+    host = (urlparse(url).hostname or "").lower()
+    if host.endswith("typeform.com"):
+        token = os.environ.get("TYPEFORM_ACCESS_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    resp = requests.get(url, headers=headers, timeout=_DOWNLOAD_TIMEOUT_S, stream=True)
     resp.raise_for_status()
     media_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
     if not media_type:

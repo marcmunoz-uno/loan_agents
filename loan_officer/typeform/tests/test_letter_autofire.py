@@ -72,6 +72,49 @@ def _seed_intake(db_path, row):
 
 # ── Parser ───────────────────────────────────────────────────────────────────
 
+class TestDownload:
+    def test_injects_bearer_for_typeform_urls(self, monkeypatch):
+        from loan_officer.typeform import letter_autofire
+        monkeypatch.setenv("TYPEFORM_ACCESS_TOKEN", "tt_test_secret")
+        captured = {}
+
+        class _FakeResp:
+            content = b"%PDF-fake"
+            headers = {"Content-Type": "application/pdf"}
+            def raise_for_status(self): pass
+
+        def _fake_get(url, headers=None, **kw):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            return _FakeResp()
+
+        monkeypatch.setattr(letter_autofire.requests, "get", _fake_get)
+        data, mt = letter_autofire._download(
+            "https://api.typeform.com/responses/files/abc/x.pdf"
+        )
+        assert data == b"%PDF-fake"
+        assert mt == "application/pdf"
+        assert captured["headers"]["Authorization"] == "Bearer tt_test_secret"
+
+    def test_no_bearer_for_non_typeform_urls(self, monkeypatch):
+        from loan_officer.typeform import letter_autofire
+        monkeypatch.setenv("TYPEFORM_ACCESS_TOKEN", "tt_test_secret")
+        captured = {}
+
+        class _FakeResp:
+            content = b"%PDF-fake"
+            headers = {"Content-Type": "application/pdf"}
+            def raise_for_status(self): pass
+
+        def _fake_get(url, headers=None, **kw):
+            captured["headers"] = headers or {}
+            return _FakeResp()
+
+        monkeypatch.setattr(letter_autofire.requests, "get", _fake_get)
+        letter_autofire._download("https://files.example.com/x.pdf")
+        assert "Authorization" not in captured["headers"]
+
+
 class TestParseBalance:
     def test_parses_clean_json(self):
         from loan_officer.typeform.letter_autofire import _parse_balance_response

@@ -58,6 +58,10 @@ services:
         value: https://2589631.my1003app.com/0/register
       - key: ZAPIER_INBOUND_SECRET
         sync: false
+      - key: TYPEFORM_ACCESS_TOKEN
+        sync: false   # Personal Access Token; required to download borrower-uploaded
+                      # asset statements from api.typeform.com so the autofire pipeline
+                      # can OCR them. Without it, downloads 401 and the letter is skipped.
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data
