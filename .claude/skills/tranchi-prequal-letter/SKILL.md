@@ -20,6 +20,28 @@ Munoz, Ghezlan & Co., Ltd. letterhead — the format is canonical as of
 loan_agents commit `2e001d0` (May 19, 2026). The body HTML and the PDF
 read identically by design.
 
+## Auto-fire from Typeform (default in prod)
+
+A completed Typeform submission with any `asset_statement_*_url` field
+populated runs the letter pipeline automatically. Hand-off path:
+
+1. `POST /api/loan/webhook/typeform-submit` — Typeform webhook
+2. `loan_officer/typeform/webhook.py` inserts the intake row, then spawns
+   a daemon thread via `letter_autofire.fire_letter_async(intake_id, row)`
+   and returns 200 inside Typeform's 10s timeout.
+3. `loan_officer/typeform/letter_autofire.py:_run()` —
+   - Downloads each `asset_statement_*_url` from Typeform's CDN
+   - Calls `chat_with_vision` (Claude) to extract `ending_balance` per doc
+   - Sums → `liquid_assets` (skips letter if < $5,000)
+   - Inserts a `loan_prequals` row from the intake's borrower data
+   - Calls `prequal_letter.generate_and_send(prequal_id, liquid_assets_override=...)`
+4. Intake row gets `email_send_status = letter_sent | letter_failed | letter_skipped`
+   and `letter_id` linking back to `prequal_letters.letter_id`.
+
+Borrowers who don't upload statements fall through to the legacy
+soft-prequal email (`typeform/email_composer.py`) — no PDF, just a
+"thanks, here's your soft prequal" reply.
+
 ## Production path (preferred)
 
 Trigger the live system. Auto-handles DB audit row, S3 upload, presigned

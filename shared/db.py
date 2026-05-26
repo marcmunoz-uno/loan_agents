@@ -73,6 +73,10 @@ def _apply_schema_patches(conn: sqlite3.Connection) -> None:
             ("source_message_id",  "TEXT DEFAULT ''"),
             ("source",             "TEXT DEFAULT ''"),
         ],
+        "loan_borrower_intakes": [
+            ("letter_id",              "TEXT DEFAULT ''"),
+            ("liquid_assets_computed", "REAL"),
+        ],
     }
     for table, cols in additions.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}

@@ -46,11 +46,15 @@ CREATE TABLE IF NOT EXISTS loan_borrower_intakes (
     decision_reasons            TEXT DEFAULT '[]',              -- JSON array of strings
 
     -- AI Loan Officer email send
-    email_send_status           TEXT NOT NULL DEFAULT 'pending',-- sent | failed | skipped | pending
+    email_send_status           TEXT NOT NULL DEFAULT 'pending',-- sent | failed | skipped | pending | letter_pending | letter_sent | letter_failed | letter_skipped
     email_subject               TEXT DEFAULT '',
     email_body                  TEXT DEFAULT '',
     email_sent_at               TEXT DEFAULT '',
     email_error                 TEXT DEFAULT '',
+
+    -- Prequal-letter autofire link (loan_officer/typeform/letter_autofire.py)
+    letter_id                   TEXT DEFAULT '',                -- FK to prequal_letters.letter_id
+    liquid_assets_computed      REAL,                           -- OCR'd sum from asset_statement_*_url
 
     -- Raw payload for auditing / replay
     raw_payload                 TEXT NOT NULL DEFAULT '{}',     -- full Typeform JSON

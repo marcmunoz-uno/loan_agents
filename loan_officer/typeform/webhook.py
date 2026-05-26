@@ -37,6 +37,7 @@ from loan_officer.arive_zapier import fire_zap
 from loan_officer.typeform.mapper import map_payload
 from loan_officer.typeform.soft_prequal import score as soft_prequal_score
 from loan_officer.typeform.email_composer import compose_email, send_email
+from loan_officer.typeform.letter_autofire import fire_letter_async
 
 logger = logging.getLogger(__name__)
 
@@ -125,30 +126,64 @@ def typeform_submit():
         insert(conn, "loan_borrower_intakes", row)
 
     # ── Compose + send AI Loan Officer email ─────────────────────────────────
-    try:
-        email = compose_email(row, prequal_dict)
-    except Exception as e:
-        logger.exception("[typeform_webhook] compose_email failed")
-        email = {"subject": "", "body": ""}
-        send_result = {"ok": False, "error": f"compose failed: {e}"}
-    else:
-        send_result = send_email(row.get("email", ""), email["subject"], email["body"], correlation_id=intake_id)
-
-    email_status = "sent" if send_result.get("ok") else ("skipped" if send_result.get("skipped") else "failed")
-    with get_conn() as conn:
-        update(
-            conn,
-            "loan_borrower_intakes",
-            {
-                "email_subject":     email.get("subject", ""),
-                "email_body":        email.get("body", ""),
-                "email_send_status": email_status,
-                "email_sent_at":     send_result.get("sent_at", "") if email_status == "sent" else "",
-                "email_error":       send_result.get("error", "") if email_status != "sent" else "",
-            },
-            "intake_id = ?",
-            (intake_id,),
+    # Two paths, picked at the row level:
+    #
+    #   Letter path (preferred): if the borrower uploaded any asset statement
+    #   URL via Typeform, spawn a daemon thread that OCRs the statements,
+    #   creates a `loan_prequals` row from the intake data, and fires the
+    #   prequal-letter pipeline (PDF + email via Zapier MCP Gmail). The
+    #   thread updates this intake row when it finishes. We mark the row
+    #   `letter_pending` here so the webhook can return 200 inside
+    #   Typeform's 10s timeout window.
+    #
+    #   Soft-email fallback: if no statements were uploaded, send the
+    #   existing intake email so the borrower still gets a same-day reply.
+    has_statements = any(
+        (row.get(f) or "").strip()
+        for f in (
+            "asset_statement_recent_url",
+            "asset_statement_previous_url",
+            "asset_statement_extra_url",
         )
+    )
+
+    if has_statements and row.get("email"):
+        with get_conn() as conn:
+            update(
+                conn,
+                "loan_borrower_intakes",
+                {"email_send_status": "letter_pending"},
+                "intake_id = ?",
+                (intake_id,),
+            )
+        fire_letter_async(intake_id, row)
+        email_status = "letter_pending"
+        email = {"subject": "", "body": ""}
+    else:
+        try:
+            email = compose_email(row, prequal_dict)
+        except Exception as e:
+            logger.exception("[typeform_webhook] compose_email failed")
+            email = {"subject": "", "body": ""}
+            send_result = {"ok": False, "error": f"compose failed: {e}"}
+        else:
+            send_result = send_email(row.get("email", ""), email["subject"], email["body"], correlation_id=intake_id)
+
+        email_status = "sent" if send_result.get("ok") else ("skipped" if send_result.get("skipped") else "failed")
+        with get_conn() as conn:
+            update(
+                conn,
+                "loan_borrower_intakes",
+                {
+                    "email_subject":     email.get("subject", ""),
+                    "email_body":        email.get("body", ""),
+                    "email_send_status": email_status,
+                    "email_sent_at":     send_result.get("sent_at", "") if email_status == "sent" else "",
+                    "email_error":       send_result.get("error", "") if email_status != "sent" else "",
+                },
+                "intake_id = ?",
+                (intake_id,),
+            )
 
     # ── Outbound notification ─────────────────────────────────────────────────
     fire_zap(

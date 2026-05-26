@@ -120,7 +120,13 @@ class TestSignature:
 class TestEndToEnd:
     def test_pass_intake_returns_pass_status(self, client, monkeypatch):
         monkeypatch.delenv("TYPEFORM_WEBHOOK_SECRET", raising=False)
-        body = json.dumps(_payload(credit="780")).encode()
+        # Stub autofire — this test is about soft_prequal scoring + the
+        # webhook returning 200 cleanly, not the letter pipeline. The
+        # letter path has its own coverage below.
+        import loan_officer.typeform.webhook as wh
+        monkeypatch.setattr(wh, "fire_letter_async", lambda *a, **k: None)
+
+        body = json.dumps(_payload(credit="780", all_docs=True)).encode()
         resp = client.post(
             "/api/loan/webhook/typeform-submit",
             data=body, content_type="application/json",
@@ -128,8 +134,32 @@ class TestEndToEnd:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["soft_prequal_status"] == "pass"
-        # No Zapier MCP configured → email_send_status should be "skipped"
-        assert data["email_send_status"] == "skipped"
+        # Asset statements uploaded → hand-off to autofire (stubbed here).
+        assert data["email_send_status"] == "letter_pending"
+
+    def test_intake_with_asset_statements_marks_letter_pending(self, client, monkeypatch):
+        """When asset statements are uploaded, the webhook should hand off to
+        the autofire thread and return immediately with status=letter_pending,
+        not block on OCR or the letter pipeline."""
+        monkeypatch.delenv("TYPEFORM_WEBHOOK_SECRET", raising=False)
+        # Stub fire_letter_async so the test doesn't actually spawn a thread
+        # that downloads URLs or calls Claude vision.
+        import loan_officer.typeform.webhook as wh
+        calls: list[tuple] = []
+        monkeypatch.setattr(wh, "fire_letter_async", lambda iid, row: calls.append((iid, row)))
+
+        body = json.dumps(_payload(credit="780", all_docs=True)).encode()
+        resp = client.post(
+            "/api/loan/webhook/typeform-submit",
+            data=body, content_type="application/json",
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["email_send_status"] == "letter_pending"
+        assert len(calls) == 1
+        intake_id, intake_row = calls[0]
+        assert intake_id.startswith("bi_")
+        assert intake_row["asset_statement_recent_url"]
 
     def test_decline_intake_returns_decline_status(self, client, monkeypatch):
         monkeypatch.delenv("TYPEFORM_WEBHOOK_SECRET", raising=False)
