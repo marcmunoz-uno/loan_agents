@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["loan_officer/tests", "loan_processor/tests"]
+testpaths = ["loan_officer/tests", "loan_officer/typeform/tests", "loan_processor/tests", "shared/tests"]
 
 [tool.pyright]
 pythonVersion = "3.11"

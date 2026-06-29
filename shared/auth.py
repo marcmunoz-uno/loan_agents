@@ -14,6 +14,7 @@ Accepts either:
     X-API-Key: <TRANCHI_API_SECRET>
 """
 
+import hmac
 import os
 from functools import wraps
 from flask import request, jsonify
@@ -22,17 +23,21 @@ TRANCHI_API_SECRET = os.environ.get("TRANCHI_API_SECRET", "dev-secret-change-me"
 
 
 def require_tranchi_auth(f):
-    """Verify requests using Bearer token or X-API-Key header."""
+    """Verify requests using Bearer token or X-API-Key header.
+
+    Uses hmac.compare_digest for constant-time comparison so the secret can't
+    be recovered via a timing side-channel.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
         secret = TRANCHI_API_SECRET
 
         auth_header = request.headers.get("Authorization", "")
-        if auth_header == f"Bearer {secret}":
+        if hmac.compare_digest(auth_header, f"Bearer {secret}"):
             return f(*args, **kwargs)
 
         api_key = request.headers.get("X-API-Key", "")
-        if api_key == secret:
+        if hmac.compare_digest(api_key, secret):
             return f(*args, **kwargs)
 
         return jsonify({"error": "Unauthorized"}), 401

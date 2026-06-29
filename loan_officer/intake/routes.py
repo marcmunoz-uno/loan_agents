@@ -29,6 +29,7 @@ import hmac
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -196,6 +197,72 @@ def docs_by_application(app_id: str):
 
 _LETTER_DEDUP_SECONDS = 24 * 60 * 60  # 24h
 
+# A required doc only counts toward completeness if Claude vision actually
+# classified it as that type with reasonable confidence. We never satisfy a
+# required slot from the borrower's self-declared label — that would let three
+# mislabeled junk uploads fire an approval letter.
+_MIN_CLASSIFY_CONFIDENCE = 0.70
+
+# Minimum liquidity before the autonomous path will mail an approval letter.
+_MIN_LIQUID_FOR_LETTER = 5_000.0
+
+
+def _claim_letter_slot(application_id: str, window_seconds: int = _LETTER_DEDUP_SECONDS) -> bool:
+    """
+    Atomically claim the right to send a letter for this application within the
+    dedup window. Returns True if the caller won the claim, False if another
+    request already holds it.
+
+    Uses BEGIN IMMEDIATE so concurrent classify→letter calls across gunicorn
+    workers serialize on the write lock — closes the TOCTOU race that could
+    otherwise mail a borrower two letters.
+    """
+    if not application_id:
+        return False
+    now = time.time()
+    conn = get_conn()
+    try:
+        conn.isolation_level = None  # manual transaction control
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT claimed_at FROM letter_claims WHERE application_id = ?",
+            (application_id,),
+        ).fetchone()
+        if row:
+            try:
+                last = float(row["claimed_at"])
+            except (TypeError, ValueError):
+                last = 0.0
+            if now - last < window_seconds:
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute(
+                "UPDATE letter_claims SET claimed_at = ? WHERE application_id = ?",
+                (str(now), application_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO letter_claims (application_id, claimed_at) VALUES (?, ?)",
+                (application_id, str(now)),
+            )
+        conn.execute("COMMIT")
+        return True
+    finally:
+        conn.close()
+
+
+def _release_letter_slot(application_id: str) -> None:
+    """Release a claim after a failed send so a transient error doesn't block
+    retries for the full dedup window."""
+    if not application_id:
+        return
+    try:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM letter_claims WHERE application_id = ?", (application_id,))
+            conn.commit()
+    except Exception:
+        pass
+
 
 def _maybe_autofire_prequal_letter(doc_id: str) -> Optional[dict[str, Any]]:
     """
@@ -234,37 +301,42 @@ def _maybe_autofire_prequal_letter(doc_id: str) -> Optional[dict[str, Any]]:
         )
     product = (pq_row.get("suggested_product") if pq_row else "dscr") or "dscr"
 
-    # 3. Run completeness against current intake state
+    # 3. Run completeness against current intake state. A required doc only
+    #    counts if it was actually CLASSIFIED as that type with sufficient
+    #    confidence — never from the borrower's self-declared label, and never
+    #    from a low-confidence guess. This stops mislabeled / misread uploads
+    #    from firing an approval letter.
     docs = list_docs_for_application(app_id)
-    received = [
-        (d.get("classified_doc_type") or d.get("declared_doc_type") or "").strip()
-        for d in docs
-        if d.get("status") in ("uploaded", "classified")
-    ]
-    received = [r for r in received if r]
+    received = []
+    for d in docs:
+        if d.get("status") != "classified":
+            continue
+        try:
+            conf = float(d.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf < _MIN_CLASSIFY_CONFIDENCE:
+            continue
+        dt = (d.get("classified_doc_type") or "").strip()
+        if dt:
+            received.append(dt)
     report = check_completeness(product, received)
     if not report.is_complete:
         return None
 
-    # 4. Dedup — skip if a letter was sent in the last 24h for this app
-    from loan_officer.prequal_letter import (
-        latest_letter_for_application,
-        generate_and_send,
-    )
+    from loan_officer.prequal_letter import generate_and_send
 
-    last = latest_letter_for_application(app_id)
-    if last:
-        try:
-            issued = datetime.fromisoformat(last["issued_at"])
-        except (KeyError, ValueError, TypeError):
-            issued = None
-        if issued and (datetime.now(timezone.utc) - issued) < timedelta(seconds=_LETTER_DEDUP_SECONDS):
-            return {"skipped": f"letter_already_sent:{last['letter_id']}"}
+    # 4. Atomically claim the letter slot — dedups across concurrent classify
+    #    calls AND across the 24h window in one race-safe step.
+    if not _claim_letter_slot(app_id):
+        return {"skipped": "letter_already_sent_or_in_flight"}
 
-    # 5. Fire
+    # 5. Fire. On failure, release the claim so a transient error doesn't block
+    #    retries for 24h.
     try:
-        letter = generate_and_send(prequal_id)
+        letter = generate_and_send(prequal_id, min_liquid=_MIN_LIQUID_FOR_LETTER)
     except Exception as e:
+        _release_letter_slot(app_id)
         return {"skipped": f"generate_failed:{e}"}
 
     return {
@@ -620,6 +692,8 @@ def _find_or_create_application(prequal_id: str, user_id: str) -> str:
 
 def _download_attachment(url: str, timeout: int = 30) -> tuple[bytes, str]:
     """Fetch the attachment bytes + content-type. Raises on transport/HTTP errors."""
+    from shared.net import assert_safe_url
+    assert_safe_url(url)  # SSRF guard — borrower/webhook-supplied URL
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     ct = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()

@@ -38,6 +38,13 @@ def seed():
     print("[seed] Initializing database...")
     init_db()
 
+    # Never inject demo borrower rows (Marc Munoz / app_seed_marc_001) into a
+    # real environment. Opt in explicitly with SEED_DATA=1 for local/dev demos.
+    from shared.config import is_production
+    if is_production() and os.environ.get("SEED_DATA", "") != "1":
+        print("[seed] Production environment without SEED_DATA=1 — skipping demo seed.")
+        return
+
     with get_conn() as conn:
         if _already_seeded(conn):
             print("[seed] Already seeded — skipping.")

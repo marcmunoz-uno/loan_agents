@@ -24,6 +24,8 @@ from functools import wraps
 from typing import Union
 from flask import request, jsonify
 
+from shared.config import is_production
+
 
 def sign_payload(body: Union[str, bytes], secret: str) -> str:
     """Return hex-encoded HMAC-SHA256 signature for the given body."""
@@ -33,9 +35,13 @@ def sign_payload(body: Union[str, bytes], secret: str) -> str:
 
 
 def verify_signature(body: bytes, signature: str, secret: str) -> bool:
-    """Return True if signature matches expected HMAC-SHA256 of body."""
+    """Return True if signature matches expected HMAC-SHA256 of body.
+
+    When no secret is configured: fail OPEN in dev (so local testing works) but
+    fail CLOSED in production (an unset secret must never accept forged payloads).
+    """
     if not secret:
-        return True  # no secret configured → skip in dev
+        return not is_production()
     expected = sign_payload(body, secret)
     return hmac.compare_digest(expected, signature)
 
@@ -54,6 +60,9 @@ def verify_webhook(secret_env: str = "LENDER_WEBHOOK_SECRET",
         def decorated(*args, **kwargs):
             secret = os.environ.get(secret_env, "")
             if not secret:
+                if is_production():
+                    # Never accept unverified webhooks in production.
+                    return jsonify({"error": "webhook secret not configured"}), 503
                 # No secret configured — pass through in dev
                 return f(*args, **kwargs)
             body = request.get_data()

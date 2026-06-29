@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request
 
+from shared.config import is_production
 from shared.db import fetchone, get_conn, insert, update
 from loan_officer.arive_zapier import fire_zap
 from loan_officer.typeform.mapper import map_payload
@@ -75,6 +76,11 @@ def typeform_submit():
         if not _verify_typeform_signature(raw_body, sig, secret):
             logger.warning("[typeform_webhook] invalid signature (header=%r)", sig[:40])
             return jsonify({"error": "Invalid Typeform signature"}), 401
+    elif is_production():
+        # Unset secret in production must never accept unverified submissions —
+        # a forged Typeform payload would mail a letter to an attacker address.
+        logger.error("[typeform_webhook] TYPEFORM_WEBHOOK_SECRET not set in production — rejecting")
+        return jsonify({"error": "webhook secret not configured"}), 503
     else:
         logger.warning("[typeform_webhook] TYPEFORM_WEBHOOK_SECRET not set — skipping signature check")
 
@@ -147,7 +153,13 @@ def typeform_submit():
         )
     )
 
-    if has_statements and row.get("email"):
+    # Only the letter path implies an approval ("conditionally pre-qualified").
+    # A declined soft-prequal (credit-pull not authorized, FICO < 620, or
+    # unparseable credit) must NEVER receive a letter — route it to the
+    # soft-email path instead, which delivers the decline reasons.
+    letter_eligible = prequal.status in ("pass", "conditional")
+
+    if has_statements and row.get("email") and letter_eligible:
         with get_conn() as conn:
             update(
                 conn,
