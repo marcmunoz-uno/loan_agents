@@ -207,3 +207,72 @@ def test_quiet_hours_blocks_without_consuming(db_path, insert_transaction, monke
     assert any(s["cause"] == "quiet_hours" for s in summary["skipped"])
     # blocked send wrote NO audit row → nothing to consume the cap
     assert guardrails.live_sends_last_24h() == 0
+
+
+# ── cooldown is mode/error-aware (the review fixes) ──────────────────────────────
+
+
+class FailingClient(FakeClient):
+    def trigger_nurture(self, *, user_id, phone, context):
+        self.calls.append(("nurture", user_id, phone, context))
+        return {"error": "boom"}
+
+
+def test_failed_live_dispatch_retries_next_sweep(db_path, insert_transaction, monkeypatch):
+    """A failed live send must NOT lock the escalation out for 24h."""
+    monkeypatch.setattr(sweeper, "build_escalations",
+                        lambda tx_id: [_esc(tx_id, "inspection_overdue")])
+    monkeypatch.setattr(guardrails, "within_quiet_hours", lambda now=None: True)
+    _set_live(insert_transaction)
+    client = FailingClient()
+
+    first = run_sweep(mode="live", client=client)
+    assert first["actions_sent_live"] == 0
+    assert len(first["errors"]) == 1
+    # a failed send doesn't count toward the cap
+    assert guardrails.live_sends_last_24h() == 0
+
+    # next sweep retries instead of treating it as on-cooldown
+    second = run_sweep(mode="live", client=client)
+    assert len(client.calls) == 2
+    assert not any(s["cause"] == "cooldown" for s in second["skipped"])
+
+
+def test_shadow_rows_do_not_block_first_live_send(db_path, insert_transaction, monkeypatch):
+    """Flipping a deal live should send immediately, not wait out shadow cooldown."""
+    monkeypatch.setattr(sweeper, "build_escalations",
+                        lambda tx_id: [_esc(tx_id, "inspection_overdue")])
+    monkeypatch.setattr(guardrails, "within_quiet_hours", lambda now=None: True)
+
+    # accrue a shadow row for this reason
+    shadow = run_sweep(mode="shadow", client=FakeClient())
+    assert shadow["actions_logged_shadow"] == 1
+
+    # now opt the deal live — the prior shadow row must NOT suppress the live send
+    _set_live(insert_transaction)
+    client = FakeClient()
+    live = run_sweep(mode="live", client=client)
+    assert live["actions_sent_live"] == 1
+    assert len(client.calls) == 1
+
+
+# ── go-live respects deal status (HTTP) ─────────────────────────────────────────
+
+
+def test_go_live_on_open_deal(client, auth_headers, insert_transaction):
+    resp = client.post(f"/api/tx/{insert_transaction}/go-live", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.get_json()["agent_mode"] == "live"
+
+
+def test_go_live_on_missing_deal_404(client, auth_headers):
+    resp = client.post("/api/tx/tx_missing/go-live", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_go_live_on_closed_deal_409(client, auth_headers, insert_transaction):
+    with get_conn() as conn:
+        conn.execute("UPDATE transactions SET status = 'closed' WHERE id = ?", (insert_transaction,))
+        conn.commit()
+    resp = client.post(f"/api/tx/{insert_transaction}/go-live", headers=auth_headers)
+    assert resp.status_code == 409

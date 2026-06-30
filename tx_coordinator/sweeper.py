@@ -237,7 +237,7 @@ def run_sweep(
             contact_syncs.append({"tx_id": tx_id, **sync_result})
 
         for esc in build_escalations(tx_id):
-            if _on_cooldown(tx_id, esc.reason, cooldown_hours):
+            if _on_cooldown(tx_id, esc.reason, cooldown_hours, effective_live=effective_live):
                 skipped.append({"tx_id": tx_id, "reason": esc.reason, "cause": "cooldown"})
                 continue
 
@@ -379,14 +379,31 @@ def _silent_party(tx_id: str, party_type: str, days: int) -> Optional[dict]:
     return None
 
 
-def _on_cooldown(tx_id: str, reason: str, hours: int) -> bool:
+def _on_cooldown(tx_id: str, reason: str, hours: int, *, effective_live: bool) -> bool:
+    """
+    Has this (deal, reason) already been acted on within the cooldown window?
+
+    Mode-aware so the cooldown only counts the kind of action we're about to take:
+
+      live  → only a PRIOR SUCCESSFUL LIVE send blocks. This means (a) a failed
+              live dispatch does NOT lock the escalation out for 24h — it retries
+              next sweep, and (b) earlier shadow rows don't suppress the first
+              live send after a deal is flipped live via /go-live.
+      shadow→ only prior shadow rows block, so shadow logging still dedupes and
+              doesn't re-log the same reason every tick.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    if effective_live:
+        clause = "AND mode = 'live' AND (error IS NULL OR error = '')"
+    else:
+        clause = "AND mode = 'shadow'"
     with get_conn() as conn:
         row = fetchone(
             conn,
-            """SELECT 1 FROM tx_outbound_messages
-               WHERE transaction_id = ? AND reason = ? AND sent_at > ?
-               LIMIT 1""",
+            f"""SELECT 1 FROM tx_outbound_messages
+                WHERE transaction_id = ? AND reason = ? AND sent_at > ?
+                  {clause}
+                LIMIT 1""",
             (tx_id, reason, cutoff),
         )
     return row is not None

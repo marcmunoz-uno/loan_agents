@@ -612,13 +612,19 @@ def tx_go_live(tx_id: str):
     """
     now = _now()
     with get_conn() as conn:
-        cur = conn.execute(
+        # Only an OPEN deal can be opted live — flipping a closed/cancelled deal
+        # live is meaningless (the sweep skips non-open deals) and leaves stale
+        # state. Distinguish "not found" from "not open" for a clear error.
+        tx = fetchone(conn, "SELECT status FROM transactions WHERE id = ?", (tx_id,))
+        if not tx:
+            return jsonify({"error": "Transaction not found"}), 404
+        if tx["status"] != "open":
+            return jsonify({"error": f"Transaction is {tx['status']}, not open", "status": tx["status"]}), 409
+        conn.execute(
             "UPDATE transactions SET agent_mode = 'live', updated_at = ? WHERE id = ?",
             (now, tx_id),
         )
         conn.commit()
-    if cur.rowcount == 0:
-        return jsonify({"error": "Transaction not found"}), 404
     return jsonify({"ok": True, "tx_id": tx_id, "agent_mode": "live"})
 
 
