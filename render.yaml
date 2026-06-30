@@ -97,6 +97,8 @@ services:
           timeout=120); \
         print(r.status_code, r.text[:500])"
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
       - key: PUBLIC_BASE_URL
         value: https://loan-agents.onrender.com
       - key: TRANCHI_API_SECRET
