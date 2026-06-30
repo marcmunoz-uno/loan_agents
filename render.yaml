@@ -62,9 +62,44 @@ services:
         sync: false   # Personal Access Token; required to download borrower-uploaded
                       # asset statements from api.typeform.com so the autofire pipeline
                       # can OCR them. Without it, downloads 401 and the letter is skipped.
+      # ── Transaction Coordinator (merged from ai_transaction_coordinator) ──
+      # shadow = log only, never dispatch outbound. Flip to "live" once the
+      # rules + deadline math are trusted against real transactions.
+      - key: TX_AGENT_MODE
+        value: shadow
+      - key: TX_SWEEPER_COOLDOWN_HOURS
+        value: "24"
+      - key: TX_SWEEPER_CONTACT_REFRESH_HOURS
+        value: "6"
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data
       sizeGB: 1
     healthCheckPath: /health
-    autoDeploy: true
+    # Deploy is gated behind CI (.github/workflows/ci.yml) — the test job must
+    # pass before the deploy job fires the Render deploy hook. Blind push-to-
+    # deploy is off so a red commit can't reach the live lender.
+    autoDeploy: false
+
+  # Render Cron: fire the proactive TC sweeper every 15 minutes. Owns no state
+  # of its own — just calls /api/tx/sweep on the loan-agents web service. Mode
+  # obeys TX_AGENT_MODE on the web service.
+  - type: cron
+    name: loan-agents-tx-sweeper
+    runtime: python
+    schedule: "*/15 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: |
+      python -c "import os, requests; \
+        r = requests.post( \
+          os.environ['PUBLIC_BASE_URL'].rstrip('/') + '/api/tx/sweep', \
+          headers={'Authorization': 'Bearer ' + os.environ['TRANCHI_API_SECRET']}, \
+          timeout=120); \
+        print(r.status_code, r.text[:500])"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: PUBLIC_BASE_URL
+        value: https://loan-agents.onrender.com
+      - key: TRANCHI_API_SECRET
+        sync: false

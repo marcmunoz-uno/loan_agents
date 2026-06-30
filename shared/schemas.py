@@ -99,6 +99,10 @@ class PSATerms(BaseModel):
     purchase_price: float
     earnest_money: float = 0.0
     closing_date: str                  # ISO date string: YYYY-MM-DD
+    # Day 0 of the timeline — the date the PSA was actually executed. If omitted,
+    # generate_timeline() falls back to today, but real callers should always
+    # pass it so milestones align with the PSA's clock, not the API call's clock.
+    psa_execution_date: Optional[str] = None
     inspection_period_days: int = 10
     financing_contingency_days: int = 21
     title_contingency_days: int = 14
@@ -120,6 +124,14 @@ class PSATerms(BaseModel):
     @field_validator("closing_date")
     @classmethod
     def validate_closing_date(cls, v: str) -> str:
+        date.fromisoformat(v)  # raises ValueError if invalid
+        return v
+
+    @field_validator("psa_execution_date")
+    @classmethod
+    def validate_psa_execution_date(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
         date.fromisoformat(v)  # raises ValueError if invalid
         return v
 

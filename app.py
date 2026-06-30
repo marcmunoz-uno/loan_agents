@@ -17,15 +17,25 @@ from flask import Flask, jsonify
 from dotenv import load_dotenv
 load_dotenv()
 
+from shared.auth import assert_secret_configured
 from shared.db import init_db
 from loan_officer.routes import loan_bp
 from loan_officer.intake.routes import intake_bp
 from loan_officer.typeform.webhook import typeform_webhook_bp
 from loan_processor.routes import processor_bp
+from tx_coordinator.routes import tx_bp
+
+# Cap request bodies (notably PSA PDF uploads to /api/tx/open-from-pdf) so a
+# large upload can't OOM the instance. Override with MAX_CONTENT_LENGTH_MB.
+MAX_CONTENT_LENGTH_MB = int(os.environ.get("MAX_CONTENT_LENGTH_MB", "25"))
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH_MB * 1024 * 1024
+
+    # Refuse to boot in prod with the default dev secret.
+    assert_secret_configured()
 
     try:
         init_db()
@@ -36,17 +46,27 @@ def create_app() -> Flask:
     app.register_blueprint(intake_bp)
     app.register_blueprint(typeform_webhook_bp)
     app.register_blueprint(processor_bp)
+    app.register_blueprint(tx_bp)
+
+    @app.errorhandler(413)
+    def too_large(_e):
+        return jsonify({
+            "error": "payload_too_large",
+            "max_mb": MAX_CONTENT_LENGTH_MB,
+        }), 413
 
     @app.route("/health", methods=["GET"])
     def health():
         return jsonify({
             "status": "ok",
             "service": "loan_agents",
-            "agents": ["loan_officer", "loan_processor", "intake"],
+            "agents": ["loan_officer", "loan_processor", "intake", "tx_coordinator"],
             "personas": [
                 "Tranchi - Loan Officer",
                 "Tranchi - Loan Processor",
+                "Tranchi - Transaction Coordinator (Sam)",
             ],
+            "agent_mode": os.environ.get("TX_AGENT_MODE", "shadow"),
             "ts": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -83,8 +103,24 @@ def create_app() -> Flask:
                     "by_app":           "GET  /api/intake/applications/<app_id>/docs",
                     "completeness":     "GET  /api/intake/applications/<app_id>/completeness?product=dscr",
                 },
+                "tx_coordinator": {
+                    "open":            "POST /api/tx/open",
+                    "open_from_pdf":   "POST /api/tx/open-from-pdf",
+                    "get":             "GET  /api/tx/<tx_id>",
+                    "complete":        "POST /api/tx/<tx_id>/milestone/<name>/complete",
+                    "party":           "POST /api/tx/<tx_id>/party",
+                    "deadlines":       "GET  /api/tx/<tx_id>/deadlines",
+                    "document":        "POST /api/tx/<tx_id>/document",
+                    "communication":   "POST /api/tx/<tx_id>/communication",
+                    "chat":            "POST /api/tx/<tx_id>/chat",
+                    "sweep":           "POST /api/tx/sweep",
+                    "order_title":     "POST /api/tx/<tx_id>/order-title",
+                    "notify":          "POST /api/tx/<tx_id>/notify",
+                    "sync_arive":      "POST /api/tx/<tx_id>/sync-arive-contacts",
+                    "link_arive_loan": "POST /api/tx/<tx_id>/link-arive-loan",
+                },
             },
-            "docs": "See loan_officer/README.md and loan_processor/README.md",
+            "docs": "See loan_officer/README.md, loan_processor/README.md, tx_coordinator/README.md",
         })
 
     return app

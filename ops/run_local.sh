@@ -32,4 +32,6 @@ echo "[run_local] Starting server on http://localhost:5010 ..."
 echo "[run_local] Press Ctrl+C to stop."
 echo ""
 
-PORT=5010 .venv/bin/python app.py
+# APP_ENV=development lets the app boot with the default dev secret. In prod
+# (Render) APP_ENV is unset and a real TRANCHI_API_SECRET is required.
+PORT=5010 APP_ENV=development .venv/bin/python app.py
