@@ -71,6 +71,17 @@ services:
         value: "24"
       - key: TX_SWEEPER_CONTACT_REFRESH_HOURS
         value: "6"
+      # ── Live-mode guardrails (only bite when a deal is opted live) ──
+      - key: TX_DAILY_SEND_CAP        # max successful live sends per rolling 24h
+        value: "3"
+      - key: TX_LIVE_CHANNELS         # voice deliberately excluded for now
+        value: "imessage,sms,email,arive"
+      - key: TX_QUIET_START           # send window start hour (inclusive)
+        value: "8"
+      - key: TX_QUIET_END             # send window end hour (exclusive)
+        value: "20"
+      - key: TX_QUIET_TZ
+        value: "America/New_York"
     disk:
       name: loan-agents-data
       mountPath: /opt/render/project/data

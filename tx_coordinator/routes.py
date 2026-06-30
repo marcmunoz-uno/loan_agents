@@ -13,6 +13,7 @@ from shared.auth import require_tranchi_auth
 from shared.db import get_conn, insert, update, fetchone, fetchall, execute
 from shared.schemas import PSATerms, PartyType, MilestoneUpdate, DocumentRef, CommunicationLog, ChatMessage
 
+from tx_coordinator import guardrails
 from tx_coordinator.agent import run_agent_turn
 from tx_coordinator.communication_hub import (
     log_communication, get_communications, communication_summary
@@ -572,3 +573,66 @@ def tx_order_title(tx_id: str):
     result = order_title_through_arive(tx_id, force=force)
     status = 200 if result.get("ok") else (409 if result.get("status", "").startswith("skipped:already") else 422)
     return jsonify(result), status
+
+
+# ── Live-mode guardrails (operator controls) ──────────────────────────────────
+
+@tx_bp.route("/guardrails", methods=["GET"])
+@require_tranchi_auth
+def tx_guardrails():
+    """Snapshot of the live-send guardrails: kill switch, cap usage, channels, quiet hours."""
+    return jsonify({"ok": True, **guardrails.config_summary()})
+
+
+@tx_bp.route("/pause", methods=["POST"])
+@require_tranchi_auth
+def tx_pause():
+    """
+    KILL SWITCH — instantly stop ALL live outbound across every deal. Takes
+    effect on the next sweep tick (no redeploy). Shadow logging continues.
+    """
+    guardrails.set_kill_switch(True)
+    return jsonify({"ok": True, "kill_switch_active": True})
+
+
+@tx_bp.route("/resume", methods=["POST"])
+@require_tranchi_auth
+def tx_resume():
+    """Clear the kill switch — live sending resumes (subject to the other guardrails)."""
+    guardrails.set_kill_switch(False)
+    return jsonify({"ok": True, "kill_switch_active": False})
+
+
+@tx_bp.route("/<tx_id>/go-live", methods=["POST"])
+@require_tranchi_auth
+def tx_go_live(tx_id: str):
+    """
+    Opt a single transaction into live sending. Sam still only sends when the
+    GLOBAL TX_AGENT_MODE is also 'live' and the per-send guardrails pass.
+    """
+    now = _now()
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE transactions SET agent_mode = 'live', updated_at = ? WHERE id = ?",
+            (now, tx_id),
+        )
+        conn.commit()
+    if cur.rowcount == 0:
+        return jsonify({"error": "Transaction not found"}), 404
+    return jsonify({"ok": True, "tx_id": tx_id, "agent_mode": "live"})
+
+
+@tx_bp.route("/<tx_id>/go-shadow", methods=["POST"])
+@require_tranchi_auth
+def tx_go_shadow(tx_id: str):
+    """Opt a single transaction back out of live sending (returns it to shadow)."""
+    now = _now()
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE transactions SET agent_mode = 'shadow', updated_at = ? WHERE id = ?",
+            (now, tx_id),
+        )
+        conn.commit()
+    if cur.rowcount == 0:
+        return jsonify({"error": "Transaction not found"}), 404
+    return jsonify({"ok": True, "tx_id": tx_id, "agent_mode": "shadow"})

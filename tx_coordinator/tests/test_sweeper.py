@@ -13,7 +13,15 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from shared.db import get_conn
+from tx_coordinator import guardrails
 from tx_coordinator.sweeper import build_escalations, run_sweep
+
+
+def _opt_in_live(tx_id: str):
+    """Per-deal opt-in: flip a single deal live (global live alone won't send)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE transactions SET agent_mode = 'live' WHERE id = ?", (tx_id,))
+        conn.commit()
 
 
 class StubOutbound:
@@ -64,9 +72,24 @@ def test_sweep_in_shadow_does_not_dispatch(insert_transaction):
     assert stub.calls == []  # no network in shadow mode
 
 
-def test_sweep_in_live_dispatches_through_outbound(insert_transaction):
+def test_global_live_without_opt_in_does_not_dispatch(insert_transaction):
+    """Per-deal opt-in: global live alone must NOT send on an un-opted deal."""
     tx_id = insert_transaction
     _make_overdue(tx_id, "inspection")
+
+    stub = StubOutbound()
+    summary = run_sweep(mode="live", client=stub)
+
+    assert summary["actions_sent_live"] == 0
+    assert stub.calls == []
+
+
+def test_sweep_in_live_dispatches_through_outbound(insert_transaction, monkeypatch):
+    tx_id = insert_transaction
+    _make_overdue(tx_id, "inspection")
+    _opt_in_live(tx_id)
+    # Make the send time-of-day independent so the test isn't flaky.
+    monkeypatch.setattr(guardrails, "within_quiet_hours", lambda now=None: True)
 
     stub = StubOutbound()
     summary = run_sweep(mode="live", client=stub)

@@ -29,6 +29,7 @@ MIGRATION_003_PATH = Path(__file__).parent / "migrations" / "003_intake.sql"
 MIGRATION_004_PATH = Path(__file__).parent / "migrations" / "004_prequal_letters.sql"
 MIGRATION_005_PATH = Path(__file__).parent / "migrations" / "005_typeform_intake.sql"
 MIGRATION_006_PATH = Path(__file__).parent / "migrations" / "006_tx_coordinator_v2.sql"
+MIGRATION_007_PATH = Path(__file__).parent / "migrations" / "007_tx_guardrails.sql"
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -57,6 +58,7 @@ def init_db() -> None:
     migrations = [
         MIGRATION_PATH, MIGRATION_002_PATH, MIGRATION_003_PATH,
         MIGRATION_004_PATH, MIGRATION_005_PATH, MIGRATION_006_PATH,
+        MIGRATION_007_PATH,
     ]
     with get_conn() as conn:
         for path in migrations:
