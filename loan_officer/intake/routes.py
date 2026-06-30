@@ -886,3 +886,54 @@ def completeness(app_id: str):
         "completion_pct": report.completion_pct,
         "message": gap_message(report),
     })
+
+
+# ── /ocr-statements ──────────────────────────────────────────────────────────
+
+@intake_bp.route("/ocr-statements", methods=["POST"])
+@require_tranchi_auth
+def ocr_statements_endpoint():
+    """
+    Compute a borrower's liquidity from their uploaded bank statements.
+
+    Runs server-side where TYPEFORM_ACCESS_TOKEN + ANTHROPIC_API_KEY already
+    live, so no secret leaves the deployment. Body (JSON):
+        {"email": "borrower@example.com", "form_id": "<optional>"}
+      or
+        {"file_urls": ["https://api.typeform.com/.../files/..."]}
+
+    Returns the liquidity total, a per-statement breakdown (balance, bank,
+    account, whether it was counted), and the resolved statement URLs.
+    Liquidity is deduped by account so the recent+previous month of one account
+    is not double-counted.
+    """
+    from loan_officer.intake.statement_liquidity import (
+        compute_liquidity_for_email,
+        compute_liquidity_for_urls,
+        TypeformTokenMissing,
+        BorrowerResponseNotFound,
+    )
+
+    body = request.get_json(silent=True) or {}
+    file_urls = body.get("file_urls")
+    email = (body.get("email") or "").strip()
+    form_id = (body.get("form_id") or "").strip() or None
+
+    if not file_urls and not email:
+        return jsonify({"error": "provide either 'email' or 'file_urls'"}), 400
+
+    try:
+        if file_urls:
+            if not isinstance(file_urls, list):
+                return jsonify({"error": "'file_urls' must be a list"}), 400
+            result = compute_liquidity_for_urls(file_urls)
+        else:
+            result = compute_liquidity_for_email(email, form_id)
+    except TypeformTokenMissing:
+        return jsonify({"error": "TYPEFORM_ACCESS_TOKEN is not configured on the server"}), 503
+    except BorrowerResponseNotFound as e:
+        return jsonify({"error": str(e)}), 404
+    except requests.RequestException as e:
+        return jsonify({"error": f"statement fetch failed: {e}"}), 502
+
+    return jsonify(result), 200

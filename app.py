@@ -111,6 +111,7 @@ def create_app() -> Flask:
                     "by_deal":          "GET  /api/intake/deals/<deal_id>/docs",
                     "by_app":           "GET  /api/intake/applications/<app_id>/docs",
                     "completeness":     "GET  /api/intake/applications/<app_id>/completeness?product=dscr",
+                    "ocr_statements":   "POST /api/intake/ocr-statements",
                 },
             },
             "docs": "See loan_officer/README.md and loan_processor/README.md",
