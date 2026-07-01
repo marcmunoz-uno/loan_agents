@@ -3,7 +3,9 @@ tx_coordinator/routes.py — Flask blueprint: /api/tx/*
 """
 
 from __future__ import annotations
+import hmac
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +17,7 @@ from shared.schemas import PSATerms, PartyType, MilestoneUpdate, DocumentRef, Co
 
 from tx_coordinator import guardrails
 from tx_coordinator.agent import run_agent_turn
+from tx_coordinator.inbound import handle_inbound_reply
 from tx_coordinator.communication_hub import (
     log_communication, get_communications, communication_summary
 )
@@ -642,3 +645,56 @@ def tx_go_shadow(tx_id: str):
     if cur.rowcount == 0:
         return jsonify({"error": "Transaction not found"}), 404
     return jsonify({"ok": True, "tx_id": tx_id, "agent_mode": "shadow"})
+
+
+# ── Inbound reply webhook (Blooio / Zapier-fired) ─────────────────────────────
+
+
+def _inbound_auth_ok() -> bool:
+    """
+    Authenticate the inbound-reply webhook. Accepts, in order:
+      1. Authorization: Bearer <secret>   (preferred — keeps the secret out of URLs)
+      2. X-Webhook-Secret: <secret>       (preferred)
+      3. ?secret=<…> query param          (webhook-URL friendly, but logged in access logs)
+    Uses TX_INBOUND_SECRET, falling back to TRANCHI_API_SECRET so the endpoint
+    is never accidentally wide open. Read at request time so the secret can be
+    rotated without a restart.
+    """
+    expected = os.environ.get("TX_INBOUND_SECRET", "") or os.environ.get("TRANCHI_API_SECRET", "")
+    if not expected:
+        return False
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and hmac.compare_digest(auth.split(" ", 1)[1], expected):
+        return True
+    if hmac.compare_digest(request.headers.get("X-Webhook-Secret", ""), expected):
+        return True
+    if hmac.compare_digest(request.args.get("secret", ""), expected):
+        return True
+    return False
+
+
+@tx_bp.route("/webhook/inbound", methods=["POST"])
+def tx_inbound_reply():
+    """
+    Receive a reply FROM a party (typically the investor) forwarded by the
+    outbound channel (Blooio iMessage via tranchi-outbound-agent, or a Zapier
+    hook). Sam matches it to the deal, interprets it, records it, applies any
+    resulting state change, and replies.
+
+    Body (flexible field names): from_phone|from|phone, text|body|message,
+    optional tx_id. Auth via bearer / X-Webhook-Secret / ?secret= (see above)
+    rather than the standard operator auth, since the sender is a webhook.
+    """
+    if not _inbound_auth_ok():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    phone = body.get("from_phone") or body.get("from") or body.get("phone") or ""
+    text = body.get("text") or body.get("body") or body.get("message") or ""
+    tx_id = body.get("tx_id")
+    if not phone or not text:
+        return jsonify({"error": "missing_fields", "need": ["from_phone", "text"]}), 400
+
+    result = handle_inbound_reply(phone, text, tx_id=tx_id)
+    status = 200 if result.get("ok") else 202  # 202: accepted but unmatched (don't make the sender retry)
+    return jsonify(result), status

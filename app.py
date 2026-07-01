@@ -150,6 +150,7 @@ def create_app() -> Flask:
                     "resume":          "POST /api/tx/resume  (kill switch off)",
                     "go_live":         "POST /api/tx/<tx_id>/go-live",
                     "go_shadow":       "POST /api/tx/<tx_id>/go-shadow",
+                    "inbound_reply":   "POST /api/tx/webhook/inbound  (Blooio/Zapier-fired)",
                 },
             },
             "docs": "See loan_officer/README.md, loan_processor/README.md, tx_coordinator/README.md",
