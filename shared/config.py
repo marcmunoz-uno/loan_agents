@@ -11,39 +11,19 @@ from __future__ import annotations
 
 import os
 
-DEFAULT_API_SECRET = "dev-secret-change-me"
-
 
 def is_production() -> bool:
-    """True in production. Render injects RENDER=true; LOAN_AGENTS_ENV overrides."""
+    """True in production. Render injects RENDER=true; LOAN_AGENTS_ENV overrides.
+
+    (The fatal default-secret check lives in shared.auth.assert_secret_configured,
+    which uses its own APP_ENV/pytest gating.)
+    """
     env = os.environ.get("LOAN_AGENTS_ENV", "").strip().lower()
     if env in ("production", "prod"):
         return True
     if env in ("dev", "development", "test", "local"):
         return False
     return bool(os.environ.get("RENDER"))
-
-
-def validate_startup_config() -> list[str]:
-    """
-    Return a list of FATAL config problems (empty list = OK). Only the
-    security-critical secret is fatal — a bad/absent API secret means the whole
-    auth + HMAC layer is unsafe, so we refuse to boot.
-
-    Only enforced in production (so dev/test boots with defaults). The caller
-    decides whether to raise; this keeps the policy in one place.
-    """
-    problems: list[str] = []
-    if not is_production():
-        return problems
-
-    secret = os.environ.get("TRANCHI_API_SECRET", "")
-    if not secret:
-        problems.append("TRANCHI_API_SECRET is not set")
-    elif secret == DEFAULT_API_SECRET:
-        problems.append("TRANCHI_API_SECRET is still the insecure default")
-
-    return problems
 
 
 def startup_warnings() -> list[str]:

@@ -20,12 +20,17 @@ from typing import Any, Optional
 
 
 DB_PATH = os.environ.get("DB_PATH", "data/dealflow.db")
+# Seconds a connection waits on a locked DB before raising, via PRAGMA
+# busy_timeout (the same mechanism sqlite3.connect(timeout=) uses).
+BUSY_TIMEOUT_S = float(os.environ.get("DB_BUSY_TIMEOUT_S", "5"))
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_initial.sql"
 MIGRATION_002_PATH = Path(__file__).parent / "migrations" / "002_loan_processor.sql"
 MIGRATION_003_PATH = Path(__file__).parent / "migrations" / "003_intake.sql"
 MIGRATION_004_PATH = Path(__file__).parent / "migrations" / "004_prequal_letters.sql"
 MIGRATION_005_PATH = Path(__file__).parent / "migrations" / "005_typeform_intake.sql"
-MIGRATION_006_PATH = Path(__file__).parent / "migrations" / "006_letter_claims.sql"
+MIGRATION_006_PATH = Path(__file__).parent / "migrations" / "006_tx_coordinator_v2.sql"
+MIGRATION_007_PATH = Path(__file__).parent / "migrations" / "007_tx_guardrails.sql"
+MIGRATION_008_PATH = Path(__file__).parent / "migrations" / "008_letter_claims.sql"
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -40,16 +45,22 @@ def get_conn() -> sqlite3.Connection:
     conn.row_factory = _dict_factory
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    # Under gunicorn (2 workers × 4 threads) WAL allows concurrent readers but
-    # only one writer. Without busy_timeout the 2nd concurrent writer gets an
-    # immediate SQLITE_BUSY; this makes it retry internally for up to 5s.
-    conn.execute("PRAGMA busy_timeout=5000")
+    # Without a busy timeout, a write that collides with another connection's
+    # write (gunicorn runs multiple workers/threads + the tx sweeper + the
+    # letter-claim lock) fails immediately with "database is locked" instead of
+    # waiting. WAL allows concurrent readers + a single writer; this makes the
+    # writer queue. (Same mechanism as sqlite3.connect(timeout=).)
+    conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
     return conn
 
 
 def init_db() -> None:
     """Run all migrations in order. Safe to call multiple times (CREATE IF NOT EXISTS)."""
-    migrations = [MIGRATION_PATH, MIGRATION_002_PATH, MIGRATION_003_PATH, MIGRATION_004_PATH, MIGRATION_005_PATH, MIGRATION_006_PATH]
+    migrations = [
+        MIGRATION_PATH, MIGRATION_002_PATH, MIGRATION_003_PATH,
+        MIGRATION_004_PATH, MIGRATION_005_PATH, MIGRATION_006_PATH,
+        MIGRATION_007_PATH, MIGRATION_008_PATH,
+    ]
     with get_conn() as conn:
         for path in migrations:
             if not path.exists():
@@ -81,6 +92,24 @@ def _apply_schema_patches(conn: sqlite3.Connection) -> None:
         "loan_borrower_intakes": [
             ("letter_id",              "TEXT DEFAULT ''"),
             ("liquid_assets_computed", "REAL"),
+        ],
+        # ── Transaction Coordinator (merged from ai_transaction_coordinator) ──
+        "transactions": [
+            # Day 0 of the milestone timeline. NULL means "use created_at as Day 0".
+            ("psa_execution_date", "TEXT"),
+            # Per-tx override of the global TX_AGENT_MODE. NULL = follow env var.
+            ("agent_mode",         "TEXT"),
+            # Arive loan record ID — FK for every Arive action on this tx.
+            ("arive_loan_id",      "TEXT DEFAULT ''"),
+        ],
+        "tx_parties": [
+            # 'arive' rows are synced from the LOS; 'agent' rows added via the
+            # API or by Sam during chat. Sync never deletes 'agent' rows.
+            ("source",            "TEXT DEFAULT 'agent'"),
+            # Stable Arive contact id so sync can upsert without duplicating.
+            ("arive_contact_id",  "TEXT DEFAULT ''"),
+            # ISO timestamp of the last successful Arive sync that touched this row.
+            ("synced_at",         "TEXT DEFAULT ''"),
         ],
     }
     for table, cols in additions.items():

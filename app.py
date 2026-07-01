@@ -18,24 +18,29 @@ from flask import Flask, jsonify
 from dotenv import load_dotenv
 load_dotenv()
 
-from shared.config import is_production, validate_startup_config, startup_warnings
+from shared.config import is_production, startup_warnings
+from shared.auth import assert_secret_configured
 from shared.db import init_db, get_conn
 from loan_officer.routes import loan_bp
 from loan_officer.intake.routes import intake_bp
 from loan_officer.typeform.webhook import typeform_webhook_bp
 from loan_processor.routes import processor_bp
+from tx_coordinator.routes import tx_bp
+
+# Cap request bodies (notably PSA PDF uploads to /api/tx/open-from-pdf) so a
+# large upload can't OOM the instance. Override with MAX_CONTENT_LENGTH_MB.
+MAX_CONTENT_LENGTH_MB = int(os.environ.get("MAX_CONTENT_LENGTH_MB", "25"))
 
 logger = logging.getLogger(__name__)
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH_MB * 1024 * 1024
 
-    # Fail loudly on bad production config rather than serving with a default
-    # secret or a missing API key.
-    problems = validate_startup_config()
-    if problems:
-        raise RuntimeError("Fatal config errors: " + "; ".join(problems))
+    # Refuse to boot in prod with the default/blank dev secret (auth + HMAC
+    # signing depend on it). Non-fatal config gaps are logged, not raised.
+    assert_secret_configured()
     for w in startup_warnings():
         logger.warning("[config] %s", w)
 
@@ -47,6 +52,14 @@ def create_app() -> Flask:
     app.register_blueprint(intake_bp)
     app.register_blueprint(typeform_webhook_bp)
     app.register_blueprint(processor_bp)
+    app.register_blueprint(tx_bp)
+
+    @app.errorhandler(413)
+    def too_large(_e):
+        return jsonify({
+            "error": "payload_too_large",
+            "max_mb": MAX_CONTENT_LENGTH_MB,
+        }), 413
 
     @app.errorhandler(Exception)
     def handle_uncaught(e):
@@ -73,11 +86,13 @@ def create_app() -> Flask:
             "status": "ok" if db_ok else "degraded",
             "db": "ok" if db_ok else "error",
             "service": "loan_agents",
-            "agents": ["loan_officer", "loan_processor", "intake"],
+            "agents": ["loan_officer", "loan_processor", "intake", "tx_coordinator"],
             "personas": [
                 "Tranchi - Loan Officer",
                 "Tranchi - Loan Processor",
+                "Tranchi - Transaction Coordinator (Sam)",
             ],
+            "agent_mode": os.environ.get("TX_AGENT_MODE", "shadow"),
             "ts": datetime.now(timezone.utc).isoformat(),
         }), (200 if db_ok else 503)
 
@@ -115,8 +130,29 @@ def create_app() -> Flask:
                     "completeness":     "GET  /api/intake/applications/<app_id>/completeness?product=dscr",
                     "ocr_statements":   "POST /api/intake/ocr-statements",
                 },
+                "tx_coordinator": {
+                    "open":            "POST /api/tx/open",
+                    "open_from_pdf":   "POST /api/tx/open-from-pdf",
+                    "get":             "GET  /api/tx/<tx_id>",
+                    "complete":        "POST /api/tx/<tx_id>/milestone/<name>/complete",
+                    "party":           "POST /api/tx/<tx_id>/party",
+                    "deadlines":       "GET  /api/tx/<tx_id>/deadlines",
+                    "document":        "POST /api/tx/<tx_id>/document",
+                    "communication":   "POST /api/tx/<tx_id>/communication",
+                    "chat":            "POST /api/tx/<tx_id>/chat",
+                    "sweep":           "POST /api/tx/sweep",
+                    "order_title":     "POST /api/tx/<tx_id>/order-title",
+                    "notify":          "POST /api/tx/<tx_id>/notify",
+                    "sync_arive":      "POST /api/tx/<tx_id>/sync-arive-contacts",
+                    "link_arive_loan": "POST /api/tx/<tx_id>/link-arive-loan",
+                    "guardrails":      "GET  /api/tx/guardrails",
+                    "pause":           "POST /api/tx/pause   (kill switch on)",
+                    "resume":          "POST /api/tx/resume  (kill switch off)",
+                    "go_live":         "POST /api/tx/<tx_id>/go-live",
+                    "go_shadow":       "POST /api/tx/<tx_id>/go-shadow",
+                },
             },
-            "docs": "See loan_officer/README.md and loan_processor/README.md",
+            "docs": "See loan_officer/README.md, loan_processor/README.md, tx_coordinator/README.md",
         })
 
     return app

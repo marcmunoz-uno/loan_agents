@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout pyright
+
+      # NOTE: the pre-existing loan_officer/loan_processor suites are
+      # integration-style — they hang on real network/LLM calls without creds.
+      # --timeout turns a hang into a loud failure instead of a 6h job. The
+      # tx_coordinator suite (71 tests) is fully self-contained and always green.
+      # Follow-up: mark the integration tests with @pytest.mark.integration and
+      # exclude them here, or provide test API keys as Actions secrets.
+      - name: Run tests
+        env:
+          APP_ENV: test
+          TRANCHI_API_SECRET: ci-test-secret
+        run: pytest -q --timeout=120
+
+      - name: Type check
+        continue-on-error: true  # advisory — shows as a warning, flip to a gate once clean
+        run: pyright
+
+  deploy:
+    # Gate deploy on green tests. autoDeploy is off in render.yaml; this fires
+    # the Render deploy hook only after the test job passes on main.
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK secret not set — skipping deploy trigger."
+            echo "Add the hook under Render service → Settings → Deploy Hook,"
+            echo "then store it as a repo secret named RENDER_DEPLOY_HOOK."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Render deploy triggered."
