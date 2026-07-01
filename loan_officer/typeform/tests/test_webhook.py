@@ -136,6 +136,8 @@ class TestEndToEnd:
         assert data["soft_prequal_status"] == "pass"
         # Asset statements uploaded → hand-off to autofire (stubbed here).
         assert data["email_send_status"] == "letter_pending"
+        # Qualified → Arive lead is eligible but gated OFF by default.
+        assert data["arive_lead_status"] == "skipped:disabled"
 
     def test_declined_borrower_with_statements_does_not_get_letter(self, client, monkeypatch):
         """A sub-620 (declined) borrower who uploaded statements must NOT be
@@ -156,6 +158,8 @@ class TestEndToEnd:
         assert data["soft_prequal_status"] == "decline"
         assert data["email_send_status"] != "letter_pending"
         assert calls == []  # autofire never triggered for a decline
+        # A declined borrower is not eligible for an Arive lead either.
+        assert data["arive_lead_status"] == "skipped:not_eligible"
 
     def test_intake_with_asset_statements_marks_letter_pending(self, client, monkeypatch):
         """When asset statements are uploaded, the webhook should hand off to
