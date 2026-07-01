@@ -26,7 +26,9 @@ def is_production() -> bool:
 
 def validate_startup_config() -> list[str]:
     """
-    Return a list of fatal config problems. Empty list = OK.
+    Return a list of FATAL config problems (empty list = OK). Only the
+    security-critical secret is fatal — a bad/absent API secret means the whole
+    auth + HMAC layer is unsafe, so we refuse to boot.
 
     Only enforced in production (so dev/test boots with defaults). The caller
     decides whether to raise; this keeps the policy in one place.
@@ -41,7 +43,14 @@ def validate_startup_config() -> list[str]:
     elif secret == DEFAULT_API_SECRET:
         problems.append("TRANCHI_API_SECRET is still the insecure default")
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        problems.append("ANTHROPIC_API_KEY is not set (chat + vision OCR will fail)")
-
     return problems
+
+
+def startup_warnings() -> list[str]:
+    """Non-fatal config gaps worth logging at boot (features degrade, but the
+    service still starts). Kept separate so a missing API key never bricks a
+    deploy — LLM calls already fail loudly on first use."""
+    warnings: list[str] = []
+    if is_production() and not os.environ.get("ANTHROPIC_API_KEY"):
+        warnings.append("ANTHROPIC_API_KEY is not set — chat + vision OCR will fail on use")
+    return warnings

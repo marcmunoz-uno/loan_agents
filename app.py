@@ -18,7 +18,7 @@ from flask import Flask, jsonify
 from dotenv import load_dotenv
 load_dotenv()
 
-from shared.config import is_production, validate_startup_config
+from shared.config import is_production, validate_startup_config, startup_warnings
 from shared.db import init_db, get_conn
 from loan_officer.routes import loan_bp
 from loan_officer.intake.routes import intake_bp
@@ -36,6 +36,8 @@ def create_app() -> Flask:
     problems = validate_startup_config()
     if problems:
         raise RuntimeError("Fatal config errors: " + "; ".join(problems))
+    for w in startup_warnings():
+        logger.warning("[config] %s", w)
 
     # A broken schema must stop the deploy — don't boot and serve 500s on every
     # DB-touching request behind a green health check.
