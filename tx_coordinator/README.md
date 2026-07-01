@@ -167,6 +167,35 @@ shows the live config, cap usage, and kill-switch state.
 
 ---
 
+## Inbound replies
+
+Sam handles replies **from** the investor, not just outbound nudges. When a buyer
+texts back, `POST /api/tx/webhook/inbound` (Blooio iMessage via
+tranchi-outbound-agent, or a Zapier hook) forwards it and `tx_coordinator/inbound.py`:
+
+1. **Matches** the sender's phone to an open deal + party, disambiguating a buyer
+   with several deals by the most recent nudge we sent that number.
+2. **Interprets** the free text with Claude against the deal's live context
+   (open contingencies, pending milestones, the last nudge) into a structured
+   intent + confidence.
+3. **Applies immediately** (and always logs the reply to the communication record,
+   which is what lets Sam later *relay* it to anyone who asks):
+   - *resolve a contingency* → `resolve_deadline` (the overdue nudge stops)
+   - *confirm a milestone* → completes it **only if buyer-actionable**. Milestones
+     only a lender/title can trigger (clear-to-close, CD received, title
+     commitment) are never advanced by a buyer text — they're logged + flagged.
+   - *low confidence / unclear* → asks the buyer to clarify; changes nothing.
+4. **Replies** with a confirmation (or the clarifying question). Reactive replies
+   **bypass the daily send cap** but respect the **kill switch**, and only send
+   when the deal is live (shadow logs the intended reply).
+
+Remembering (steps 1–3) happens in **any** mode — Sam learns what the buyer said
+even in shadow. Only the outbound reply is gated on live mode. Auth for the
+webhook uses `TX_INBOUND_SECRET` (falls back to `TRANCHI_API_SECRET`) via bearer,
+`X-Webhook-Secret`, or `?secret=`.
+
+---
+
 ## Standard Milestone Timeline
 
 | Milestone | Target Day |
