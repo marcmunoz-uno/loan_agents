@@ -36,6 +36,7 @@ from typing import Any, Literal, Optional
 
 from shared.db import get_conn, fetchall, fetchone
 from shared.tranchi_client import OutboundClient
+from tx_coordinator import guardrails
 from tx_coordinator.arive_actions import order_title_through_arive, sync_parties_from_arive
 from tx_coordinator.deadline_engine import deadline_health_check
 from tx_coordinator.parties import get_parties, get_party_by_type
@@ -224,7 +225,10 @@ def run_sweep(
 
     for tx_row in open_txs:
         tx_id = tx_row["id"]
-        tx_mode: AgentMode = tx_row.get("agent_mode") or global_mode  # type: ignore[assignment]
+        # Per-deal opt-in: a deal only sends live when BOTH the global mode is
+        # live AND this deal was explicitly flipped live (agent_mode='live').
+        # Global-live alone leaves un-opted deals in shadow.
+        effective_live = (global_mode == "live") and (tx_row.get("agent_mode") == "live")
 
         # Refresh the party roster from Arive if it's been a while and we
         # have a loan id to look up. No-op when Zapier isn't configured.
@@ -233,38 +237,51 @@ def run_sweep(
             contact_syncs.append({"tx_id": tx_id, **sync_result})
 
         for esc in build_escalations(tx_id):
-            if _on_cooldown(tx_id, esc.reason, cooldown_hours):
+            if _on_cooldown(tx_id, esc.reason, cooldown_hours, effective_live=effective_live):
                 skipped.append({"tx_id": tx_id, "reason": esc.reason, "cause": "cooldown"})
                 continue
 
-            outbound_ref = ""
-            err = ""
-            if tx_mode == "live":
+            if effective_live:
+                # Live send must clear the guardrails. A blocked send writes NO
+                # audit row, so it isn't consumed — it retries on the next sweep
+                # once the gate clears (quiet hours pass, cap resets, etc.).
+                block = guardrails.evaluate(esc.channel)
+                if block:
+                    skipped.append({"tx_id": tx_id, "reason": esc.reason, "cause": block})
+                    continue
+
                 outbound_ref, err = _dispatch(esc, client)
+                _audit(esc, mode="live", outbound_ref=outbound_ref, error=err)
                 if err:
                     errors.append({"tx_id": tx_id, "reason": esc.reason, "error": err})
+                else:
+                    sent.append({
+                        "tx_id": tx_id, "reason": esc.reason,
+                        "target_role": esc.target_role, "channel": esc.channel,
+                    })
+            else:
+                # Shadow: record what we would have sent; nothing leaves the box.
+                _audit(esc, mode="shadow", outbound_ref="", error="")
+                logged.append({
+                    "tx_id": tx_id, "reason": esc.reason,
+                    "target_role": esc.target_role, "channel": esc.channel,
+                })
 
-            _audit(esc, mode=tx_mode, outbound_ref=outbound_ref, error=err)
-
-            (sent if tx_mode == "live" and not err else logged).append({
-                "tx_id": tx_id,
-                "reason": esc.reason,
-                "target_role": esc.target_role,
-                "channel": esc.channel,
-            })
-
+    skipped_cooldown = sum(1 for s in skipped if s["cause"] == "cooldown")
     return {
         "ok": True,
         "mode": global_mode,
         "transactions_scanned": len(open_txs),
         "actions_sent_live": len(sent),
         "actions_logged_shadow": len(logged),
-        "actions_skipped_cooldown": len(skipped),
+        "actions_skipped_cooldown": skipped_cooldown,
+        "actions_skipped_guardrail": len(skipped) - skipped_cooldown,
         "errors": errors,
         "sent": sent,
         "logged": logged,
         "skipped": skipped,
         "contact_syncs": contact_syncs,
+        "guardrails": guardrails.config_summary(),
         "swept_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -362,14 +379,31 @@ def _silent_party(tx_id: str, party_type: str, days: int) -> Optional[dict]:
     return None
 
 
-def _on_cooldown(tx_id: str, reason: str, hours: int) -> bool:
+def _on_cooldown(tx_id: str, reason: str, hours: int, *, effective_live: bool) -> bool:
+    """
+    Has this (deal, reason) already been acted on within the cooldown window?
+
+    Mode-aware so the cooldown only counts the kind of action we're about to take:
+
+      live  → only a PRIOR SUCCESSFUL LIVE send blocks. This means (a) a failed
+              live dispatch does NOT lock the escalation out for 24h — it retries
+              next sweep, and (b) earlier shadow rows don't suppress the first
+              live send after a deal is flipped live via /go-live.
+      shadow→ only prior shadow rows block, so shadow logging still dedupes and
+              doesn't re-log the same reason every tick.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    if effective_live:
+        clause = "AND mode = 'live' AND (error IS NULL OR error = '')"
+    else:
+        clause = "AND mode = 'shadow'"
     with get_conn() as conn:
         row = fetchone(
             conn,
-            """SELECT 1 FROM tx_outbound_messages
-               WHERE transaction_id = ? AND reason = ? AND sent_at > ?
-               LIMIT 1""",
+            f"""SELECT 1 FROM tx_outbound_messages
+                WHERE transaction_id = ? AND reason = ? AND sent_at > ?
+                  {clause}
+                LIMIT 1""",
             (tx_id, reason, cutoff),
         )
     return row is not None
