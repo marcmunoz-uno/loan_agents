@@ -33,6 +33,7 @@ said even in shadow. Only the outbound reply in step 4 is gated on live mode.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -56,14 +57,20 @@ BUYER_ACTIONABLE_MILESTONES: set[str] = {
     "inspection_completed",
     "inspection_response_deadline",
     "title_ordered",
-    "appraisal_ordered",
     "financing_contingency_deadline",
     "title_contingency_deadline",
     "final_walkthrough",
 }
+# NOTE: appraisal_ordered is deliberately NOT buyer-actionable — the lender
+# orders the appraisal, so a buyer text can't confirm it.
 
 CONTINGENCY_TYPES = {"inspection", "financing", "title"}
-CONFIDENCE_THRESHOLD = 0.6
+# Irreversible state changes (resolve a contingency / complete a milestone) need
+# a high bar — there's no un-complete path. Non-mutating intents just log.
+MUTATION_CONFIDENCE = 0.75
+# Only the buyer/investor can drive deal-state changes by text. Replies from
+# other parties are logged (so Sam remembers + can relay) but never mutate.
+MUTATION_PARTY_TYPES = {"buyer"}
 
 # Contingency milestone slug → deadline contingency_type, so completing the
 # milestone and resolving the deadline stay in sync.
@@ -119,7 +126,18 @@ def _match_deal(from_phone: str, tx_id: Optional[str]) -> Optional[dict]:
             )
         return (row or {}).get("last") or ""
 
-    best = max(candidates, key=lambda r: last_contact(r["tx_id"], r["party_id"]))
+    scored = sorted(
+        ((r, last_contact(r["tx_id"], r["party_id"])) for r in candidates),
+        key=lambda x: x[1], reverse=True,
+    )
+    # If several deals tie with no outbound history to break the tie, don't
+    # guess which deal the reply is about — flag it for a human / an explicit tx_id.
+    if len(scored) > 1 and tx_id is None and scored[0][1] == scored[1][1]:
+        return {"ambiguous": True,
+                "candidates": [{"tx_id": r["tx_id"], "party_type": r["party_type"]}
+                               for r, _ in scored]}
+
+    best = scored[0][0]
     best["last_nudge"] = _last_nudge(best["tx_id"], best["party_id"])
     return best
 
@@ -183,6 +201,10 @@ def _llm_interpret(text: str, context: dict, last_nudge: Optional[dict]) -> dict
                    max_tokens=400, temperature=0.0)
         data = json.loads(_extract_json(raw))
     except Exception:
+        # Fail safe (no mutation) but make the failure visible — a sustained
+        # interpret outage means every reply becomes a generic "clarify?".
+        logging.getLogger("tx_coordinator.inbound").exception(
+            "LLM interpret failed for inbound reply")
         return {"intent": "unclear", "contingency_type": None, "milestone_name": None,
                 "confidence": 0.0, "summary": f"Buyer replied: {text[:160]}",
                 "reply": "Thanks — could you clarify what that's in reference to?"}
@@ -245,21 +267,41 @@ def _send_reply(tx_id: str, party: dict, text: str, *, agent_mode: Optional[str]
     log_communication(tx_id, summary=f"[sam-reply] {text[:120]}", direction="out",
                        channel="imessage", party_id=party.get("party_id"), full_text=text)
 
+    def finish(sent: bool, reason: str) -> dict:
+        # Audit into tx_outbound_messages too, with mode='reply' so the ledger
+        # is complete but these reactive rows are invisible to the cap/cooldown
+        # queries (which only look at mode='live'/'shadow').
+        _audit_reply(tx_id, party.get("party_id"), text, error="" if sent else reason)
+        return {"sent": sent, "reason": reason}
+
     if not _deal_is_live(agent_mode):
-        return {"sent": False, "reason": "shadow"}
+        return finish(False, "shadow")
     if guardrails.kill_switch_active():
-        return {"sent": False, "reason": "kill_switch"}
+        return finish(False, "kill_switch")
     phone = party.get("phone") or ""
     if not phone:
-        return {"sent": False, "reason": "no_phone"}
+        return finish(False, "no_phone")
 
     cli = client or OutboundClient()
     try:
         resp = cli.trigger_nurture(user_id=tx_id, phone=phone, context=text)
     except Exception as e:  # noqa: BLE001
-        return {"sent": False, "reason": f"error:{type(e).__name__}"}
+        return finish(False, f"error:{type(e).__name__}")
     err = resp.get("error") if isinstance(resp, dict) else ""
-    return {"sent": not err, "reason": "sent" if not err else "outbound_error"}
+    return finish(not err, "sent" if not err else "outbound_error")
+
+
+def _audit_reply(tx_id: str, party_id: Optional[int], body: str, *, error: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO tx_outbound_messages
+               (transaction_id, party_id, target_role, channel, reason, body,
+                mode, outbound_ref, sent_at, error)
+               VALUES (?, ?, 'investor', 'imessage', 'inbound_reply_ack', ?, 'reply', '', ?, ?)""",
+            (tx_id, party_id, body[:4000], now, error),
+        )
+        conn.commit()
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -280,8 +322,32 @@ def handle_inbound_reply(
     match = _match_deal(from_phone, tx_id)
     if not match:
         return {"ok": False, "status": "unmatched_sender", "from": from_phone}
+    if match.get("ambiguous"):
+        # Buyer has several open deals and we can't tell which this answers.
+        return {"ok": False, "status": "ambiguous_sender",
+                "candidates": match["candidates"],
+                "hint": "resend with an explicit tx_id"}
 
     tx = match["tx_id"]
+    party_type = match["party_type"]
+
+    # SAFETY: only the buyer/investor can drive deal-state changes by text.
+    # A reply from any other party (seller, listing agent, lender, title) is
+    # recorded — so Sam remembers it and can relay it — but never mutates state.
+    if party_type not in MUTATION_PARTY_TYPES:
+        log_communication(tx, summary=f"[{party_type}] {text[:160]}",
+                          direction="in", channel="imessage",
+                          party_id=match["party_id"], full_text=text)
+        reply_text = "Thanks — I've noted that on the file."
+        reply_result = _send_reply(tx, match, reply_text,
+                                   agent_mode=match.get("agent_mode"), client=client)
+        return {"ok": True, "tx_id": tx,
+                "matched_party": {"party_id": match["party_id"], "type": party_type,
+                                  "name": match["name"]},
+                "intent": "non_buyer_reply",
+                "applied": {"action": "logged_non_buyer", "party_type": party_type},
+                "reply": {"text": reply_text, **reply_result}}
+
     context = _deal_context(tx)
     interp = (interpret or _llm_interpret)(text, context, match.get("last_nudge"))
 
@@ -295,9 +361,9 @@ def handle_inbound_reply(
     applied: dict[str, Any] = {"action": "none"}
     reply_text = interp.get("reply") or "Thanks — noted."
 
-    low_confidence = confidence < CONFIDENCE_THRESHOLD
-    if low_confidence or intent in ("unclear", "question"):
-        # Ask the buyer to clarify; change nothing.
+    is_mutation = intent in ("resolve_contingency", "confirm_milestone")
+    if intent in ("unclear", "question") or (is_mutation and confidence < MUTATION_CONFIDENCE):
+        # Not confident enough to change deal state — ask the buyer to clarify.
         applied = {"action": "clarify"}
         reply_text = interp.get("reply") or (
             "Thanks for the reply — just to make sure I log this correctly, what "
@@ -313,13 +379,16 @@ def handle_inbound_reply(
         applied = {"action": "resolved_contingency", "contingency_type": ct, "changed": resolved}
     elif intent == "confirm_milestone" and interp.get("milestone_name"):
         name = interp["milestone_name"]
-        if name in BUYER_ACTIONABLE_MILESTONES:
+        # Must be buyer-actionable AND actually pending on THIS deal — the second
+        # check defends against the LLM naming a valid-but-unrelated milestone.
+        if name in BUYER_ACTIONABLE_MILESTONES and name in context["pending_milestones"]:
             done = _complete_milestone(tx, name)
             if name in _MILESTONE_TO_CONTINGENCY:
                 resolve_deadline(tx, _MILESTONE_TO_CONTINGENCY[name], actor="investor_reply")
             applied = {"action": "completed_milestone", "milestone": name, "changed": done}
         else:
-            # High-stakes milestone — record + flag, never auto-advance from a buyer text.
+            # High-stakes, unknown, or not-pending milestone — record + flag,
+            # never auto-advance from a buyer text.
             applied = {"action": "flagged_for_human", "milestone": name}
             reply_text = interp.get("reply") or (
                 "Thanks — I've noted that and will confirm it with the right party on the file."

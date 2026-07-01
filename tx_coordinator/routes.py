@@ -649,19 +649,18 @@ def tx_go_shadow(tx_id: str):
 
 # ── Inbound reply webhook (Blooio / Zapier-fired) ─────────────────────────────
 
-_TX_INBOUND_SECRET = os.environ.get("TX_INBOUND_SECRET", "")
-
 
 def _inbound_auth_ok() -> bool:
     """
     Authenticate the inbound-reply webhook. Accepts, in order:
-      1. Authorization: Bearer <secret>
-      2. X-Webhook-Secret: <secret>
-      3. ?secret=<…> query param (webhook-URL friendly)
+      1. Authorization: Bearer <secret>   (preferred — keeps the secret out of URLs)
+      2. X-Webhook-Secret: <secret>       (preferred)
+      3. ?secret=<…> query param          (webhook-URL friendly, but logged in access logs)
     Uses TX_INBOUND_SECRET, falling back to TRANCHI_API_SECRET so the endpoint
-    is never accidentally wide open.
+    is never accidentally wide open. Read at request time so the secret can be
+    rotated without a restart.
     """
-    expected = _TX_INBOUND_SECRET or os.environ.get("TRANCHI_API_SECRET", "")
+    expected = os.environ.get("TX_INBOUND_SECRET", "") or os.environ.get("TRANCHI_API_SECRET", "")
     if not expected:
         return False
     auth = request.headers.get("Authorization", "")

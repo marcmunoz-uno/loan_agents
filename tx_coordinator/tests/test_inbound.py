@@ -72,6 +72,46 @@ def test_unmatched_sender(db_path, insert_transaction):
     assert res["status"] == "unmatched_sender"
 
 
+def test_non_buyer_reply_is_logged_never_mutates(db_path, insert_transaction):
+    """A listing agent (or any non-buyer) texting must not change deal state."""
+    AGENT_PHONE = "+13135550200"
+    now = "2026-07-01T00:00:00+00:00"
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO tx_parties (transaction_id, party_type, name, phone, added_at)
+               VALUES (?, 'listing_agent', 'Bob Williams', ?, ?)""",
+            (insert_transaction, AGENT_PHONE, now))
+        conn.commit()
+
+    # Even if the interpreter *would* say resolve-inspection, a non-buyer can't mutate.
+    res = handle_inbound_reply(AGENT_PHONE, "inspection contingency is waived",
+                               interpret=_stub(intent="resolve_contingency",
+                                               contingency_type="inspection", confidence=0.99))
+    assert res["applied"]["action"] == "logged_non_buyer"
+    assert res["matched_party"]["type"] == "listing_agent"
+    assert _deadline_status(insert_transaction, "inspection") == "active"  # untouched
+
+
+def test_ambiguous_sender_when_multiple_deals_no_history(db_path, insert_transaction):
+    """Buyer on two open deals, no outbound to break the tie → flag, don't guess."""
+    now = "2026-07-01T00:00:00+00:00"
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO transactions (id, user_id, psa_terms, purchase_price, closing_date,
+                   status, current_milestone, property_address, buyer_name, seller_name,
+                   notes, created_at, updated_at)
+               VALUES ('tx_second', 'u', '{}', 100000, '2026-08-01', 'open', 'psa_executed',
+                       '9 Elm St', 'Marc Munoz', 'Jane Doe', '', ?, ?)""", (now, now))
+        conn.execute(
+            """INSERT INTO tx_parties (transaction_id, party_type, name, phone, added_at)
+               VALUES ('tx_second', 'buyer', 'Marc Munoz', ?, ?)""", (BUYER_PHONE, now))
+        conn.commit()
+
+    res = handle_inbound_reply(BUYER_PHONE, "waived it", interpret=_stub())
+    assert res["ok"] is False
+    assert res["status"] == "ambiguous_sender"
+
+
 # ── remembering works in ANY mode ───────────────────────────────────────────────
 
 
@@ -115,6 +155,43 @@ def test_low_confidence_asks_to_clarify_and_changes_nothing(db_path, insert_tran
                                                contingency_type="inspection", confidence=0.3))
     assert res["applied"]["action"] == "clarify"
     assert _deadline_status(insert_transaction, "inspection") == "active"  # untouched
+
+
+def test_mid_confidence_below_mutation_bar_clarifies(db_path, insert_transaction):
+    """0.7 clears the old 0.6 bar but not the 0.75 mutation bar → clarify, no change."""
+    res = handle_inbound_reply(BUYER_PHONE, "think I waived inspection?",
+                               interpret=_stub(intent="resolve_contingency",
+                                               contingency_type="inspection", confidence=0.7))
+    assert res["applied"]["action"] == "clarify"
+    assert _deadline_status(insert_transaction, "inspection") == "active"
+
+
+def test_confirm_milestone_not_pending_is_flagged(db_path, insert_transaction):
+    """A buyer-actionable slug that isn't pending on this deal must not complete."""
+    with get_conn() as conn:  # mark it already done → no longer pending
+        conn.execute(
+            "UPDATE tx_milestones SET status='completed' WHERE transaction_id=? AND milestone_name='title_ordered'",
+            (insert_transaction,))
+        conn.commit()
+    res = handle_inbound_reply(BUYER_PHONE, "I ordered title",
+                               interpret=_stub(intent="confirm_milestone",
+                                               milestone_name="title_ordered", confidence=0.95))
+    assert res["applied"]["action"] == "flagged_for_human"
+
+
+def test_reply_is_audited_to_outbound_ledger(db_path, insert_transaction):
+    """Reactive replies land in tx_outbound_messages with mode='reply' (audit, not cap)."""
+    handle_inbound_reply(BUYER_PHONE, "waived inspection",
+                         interpret=_stub(intent="resolve_contingency",
+                                         contingency_type="inspection", confidence=0.9))
+    with get_conn() as conn:
+        rows = fetchall(conn,
+            "SELECT mode, reason FROM tx_outbound_messages WHERE transaction_id=? AND mode='reply'",
+            (insert_transaction,))
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "inbound_reply_ack"
+    # and it must NOT count toward the live cap
+    assert guardrails.live_sends_last_24h() == 0
 
 
 # ── reply gating ────────────────────────────────────────────────────────────────
