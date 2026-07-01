@@ -35,6 +35,7 @@ from flask import Blueprint, jsonify, request
 from shared.config import is_production
 from shared.db import fetchone, get_conn, insert, update
 from loan_officer.arive_zapier import fire_zap
+from loan_officer.arive_create_lead import create_lead_from_intake
 from loan_officer.typeform.mapper import map_payload
 from loan_officer.typeform.soft_prequal import score as soft_prequal_score
 from loan_officer.typeform.email_composer import compose_email, send_email
@@ -197,6 +198,19 @@ def typeform_submit():
                 (intake_id,),
             )
 
+    # ── Arive lead (top of funnel) ────────────────────────────────────────────
+    # Qualified submissions become an Arive *lead* (no 1003 borrower email).
+    # Best-effort + gated behind ARIVE_CREATE_LEADS (default OFF) — see
+    # arive_create_lead for the current create_lead action blocker.
+    arive_lead_status = "skipped:not_eligible"
+    if prequal.status in ("pass", "conditional"):
+        try:
+            arive_lead_status = create_lead_from_intake(row, correlation_id=intake_id).get("status", "unknown")
+        except Exception:
+            logger.exception("[typeform_webhook] arive lead creation crashed")
+            arive_lead_status = "failed:exception"
+    logger.info("[typeform_webhook] %s arive_lead=%s", intake_id, arive_lead_status)
+
     # ── Outbound notification ─────────────────────────────────────────────────
     fire_zap(
         "borrower_intake_created",
@@ -220,4 +234,5 @@ def typeform_submit():
         "soft_prequal_score":  prequal.score,
         "missing_required_docs": prequal.missing_required_docs,
         "email_send_status": email_status,
+        "arive_lead_status": arive_lead_status,
     }), 200
