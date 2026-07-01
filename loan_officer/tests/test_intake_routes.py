@@ -375,8 +375,15 @@ def _seed_prequal_and_app(app_id="app_autofire_1", prequal_id="pq_autofire_1"):
         })
 
 
-def _upload_classified_doc(app_client, auth_headers, stub_s3, app_id, declared_type):
-    """Helper: presign → confirm so the doc lands in 'uploaded' state attached to app_id."""
+def _upload_classified_doc(app_client, auth_headers, stub_s3, app_id, declared_type, classify=True):
+    """Helper: presign → confirm, optionally stamping a successful classification.
+
+    The autofire gate only counts docs that were genuinely CLASSIFIED as their
+    type with high confidence (never the borrower's self-declared label), so by
+    default the helper records a classified_doc_type + confidence to model a real
+    intake. Pass classify=False to leave the doc in 'uploaded' state when the test
+    will classify it through the /classify endpoint (which triggers autofire).
+    """
     p = app_client.post("/api/intake/upload/presign", headers=auth_headers,
                         json={"deal_id": "d", "filename": f"{declared_type}.pdf",
                               "content_type": "application/pdf",
@@ -384,6 +391,12 @@ def _upload_classified_doc(app_client, auth_headers, stub_s3, app_id, declared_t
                               "declared_doc_type": declared_type}).get_json()
     app_client.post("/api/intake/upload/confirm", headers=auth_headers,
                     json={"doc_id": p["doc_id"]})
+    if classify:
+        from shared.db import get_conn, update
+        with get_conn() as conn:
+            update(conn, "intake_documents",
+                   {"classified_doc_type": declared_type, "confidence": 0.95, "status": "classified"},
+                   "doc_id = ?", (p["doc_id"],))
     return p["doc_id"]
 
 
@@ -404,7 +417,7 @@ def test_classify_autofires_letter_when_dscr_checklist_complete(app_client, auth
         # Upload rent_roll + purchase_contract upfront
         _upload_classified_doc(app_client, auth_headers, stub_s3, "app_autofire_1", "rent_roll")
         _upload_classified_doc(app_client, auth_headers, stub_s3, "app_autofire_1", "purchase_contract")
-        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_autofire_1", "bank_stmt")
+        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_autofire_1", "bank_stmt", classify=False)
         resp = app_client.post(f"/api/intake/upload/{bank_doc}/classify", headers=auth_headers)
 
     body = resp.get_json()
@@ -424,7 +437,7 @@ def test_classify_no_autofire_when_checklist_incomplete(app_client, auth_headers
     with patch("loan_officer.intake.upload.get_default_client", return_value=stub_s3), \
          patch("loan_officer.intake.ocr_classifier.get_default_client", return_value=stub_s3), \
          patch("loan_officer.intake.ocr_classifier.chat_with_vision", return_value=vision_payload):
-        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_partial", "bank_stmt")
+        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_partial", "bank_stmt", classify=False)
         resp = app_client.post(f"/api/intake/upload/{bank_doc}/classify", headers=auth_headers)
 
     body = resp.get_json()
@@ -433,33 +446,16 @@ def test_classify_no_autofire_when_checklist_incomplete(app_client, auth_headers
 
 
 def test_classify_skips_autofire_when_recent_letter_exists(app_client, auth_headers, stub_s3):
-    """Classifying after a letter was just sent for the app should report 'letter_already_sent'."""
+    """Classifying after a letter slot was just claimed for the app should be deduped."""
     from shared.db import get_conn, insert
+    import time
     _seed_prequal_and_app("app_dedup", "pq_dedup")
 
-    # Pre-seed a recent letter row (issued just now so dedup blocks the new fire)
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
+    # Pre-claim the letter slot just now so the atomic dedup blocks the new fire.
     with get_conn() as conn:
-        insert(conn, "prequal_letters", {
-            "letter_id":          "pql_recent",
-            "prequal_id":         "pq_dedup",
-            "application_id":     "app_dedup",
-            "borrower_name":      "Maya",
-            "borrower_email":     "maya@example.com",
-            "max_pp_low":         60000,
-            "max_pp_high":        80000,
-            "liquid_assets":      25000,
-            "monthly_rent_used":  900,
-            "rate_low_pct":       5.875,
-            "rate_high_pct":      8.0,
-            "down_pct_low":       20.0,
-            "issued_at":          now,
-            "expires_at":         now,
-            "zap_fired":          1,
-            "sent_to":            "maya@example.com",
-            "breakdown":          "{}",
-            "created_at":         now,
+        insert(conn, "letter_claims", {
+            "application_id": "app_dedup",
+            "claimed_at":     str(time.time()),
         })
 
     vision_payload = '{"doc_type": "bank_stmt", "confidence": 0.9, "extracted_fields": {}, "warnings": []}'
@@ -468,7 +464,7 @@ def test_classify_skips_autofire_when_recent_letter_exists(app_client, auth_head
          patch("loan_officer.intake.ocr_classifier.chat_with_vision", return_value=vision_payload):
         _upload_classified_doc(app_client, auth_headers, stub_s3, "app_dedup", "rent_roll")
         _upload_classified_doc(app_client, auth_headers, stub_s3, "app_dedup", "purchase_contract")
-        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_dedup", "bank_stmt")
+        bank_doc = _upload_classified_doc(app_client, auth_headers, stub_s3, "app_dedup", "bank_stmt", classify=False)
         resp = app_client.post(f"/api/intake/upload/{bank_doc}/classify", headers=auth_headers)
 
     body = resp.get_json()

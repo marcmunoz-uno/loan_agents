@@ -41,8 +41,9 @@ def test_coerce_money_handles_currency_strings():
 def test_pick_balance_prefers_canonical_keys():
     assert _pick_balance({"ending_balance": "$8,500"}) == 8500.0
     assert _pick_balance({"available_balance": 1500, "ending_balance": 2000}) == 2000.0
-    # Falls back to anything containing "balance"
-    assert _pick_balance({"prior_month_balance": 999}) == 999.0
+    # Whitelist only — a non-canonical "*balance" field is NOT trusted, since it
+    # could be a beginning/minimum/prior-month balance or a different sub-account.
+    assert _pick_balance({"prior_month_balance": 999}) is None
     assert _pick_balance({"bank_name": "Chase"}) is None
 
 
@@ -175,6 +176,28 @@ def test_extract_liquidity_empty_app(temp_db):
     assert out["liquid_assets"] == 0.0
 
 
+def test_extract_liquidity_dedupes_same_account_across_months(temp_db):
+    """Two monthly statements for the SAME account must not be summed — that
+    would double-count liquidity and inflate the max purchase price."""
+    _seed_intake_doc("app_dd", "doc_1", "bank_stmt",
+                     {"bank_name": "Chase", "account_number": "1234567890", "ending_balance": 40_000})
+    _seed_intake_doc("app_dd", "doc_2", "bank_stmt",
+                     {"bank_name": "Chase", "account_number": "1234567890", "ending_balance": 42_000})
+    out = extract_liquidity_from_intake("app_dd")
+    assert out["liquid_assets"] == 42_000.0     # latest/largest, not 82,000
+    assert out["num_accounts"] == 1
+
+
+def test_extract_liquidity_skips_implausible_ocr_balance(temp_db):
+    """An OCR misread (e.g. account number read as a balance) must be dropped,
+    not turned into a multi-million-dollar max purchase price."""
+    _seed_intake_doc("app_big", "doc_1", "bank_stmt", {"ending_balance": 99_999_999_999})
+    _seed_intake_doc("app_big", "doc_2", "bank_stmt", {"ending_balance": 30_000})
+    out = extract_liquidity_from_intake("app_big")
+    assert out["liquid_assets"] == 30_000.0
+    assert out["num_bank_stmts_skipped"] == 1
+
+
 # ── PDF rendering ────────────────────────────────────────────────────────────
 
 def test_render_letter_pdf_returns_pdf_bytes():
@@ -296,6 +319,21 @@ def test_generate_and_send_skip_send_flag(temp_db):
 def test_generate_and_send_unknown_prequal_raises(temp_db):
     with pytest.raises(ValueError, match="not found"):
         generate_and_send("pq_does_not_exist")
+
+
+def test_generate_and_send_below_min_liquid_raises(temp_db):
+    """Autonomous callers pass min_liquid; a thin file must never mail a letter."""
+    _seed_prequal("pq_thin", liquidity=2_000)
+    with pytest.raises(ValueError, match="below minimum"):
+        generate_and_send("pq_thin", min_liquid=5_000.0, skip_send=True)
+
+
+def test_generate_and_send_zero_max_pp_raises(temp_db):
+    """$0 liquidity floors max purchase price at $0 — refuse rather than email
+    a "$0 – $5,000" letter on the firm's letterhead."""
+    _seed_prequal("pq_zero", liquidity=0)
+    with pytest.raises(ValueError, match="max purchase price is \\$0"):
+        generate_and_send("pq_zero", liquid_assets_override=0.0, skip_send=True)
 
 
 def test_generate_and_send_uses_liquidity_override(temp_db):

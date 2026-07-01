@@ -30,6 +30,7 @@ MIGRATION_004_PATH = Path(__file__).parent / "migrations" / "004_prequal_letters
 MIGRATION_005_PATH = Path(__file__).parent / "migrations" / "005_typeform_intake.sql"
 MIGRATION_006_PATH = Path(__file__).parent / "migrations" / "006_tx_coordinator_v2.sql"
 MIGRATION_007_PATH = Path(__file__).parent / "migrations" / "007_tx_guardrails.sql"
+MIGRATION_008_PATH = Path(__file__).parent / "migrations" / "008_letter_claims.sql"
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -40,15 +41,15 @@ def get_conn() -> sqlite3.Connection:
     """Return an open sqlite3 connection with row_factory set to dict."""
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=15.0)
     conn.row_factory = _dict_factory
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     # Without a busy timeout, a write that collides with another connection's
-    # write (gunicorn runs multiple workers/threads + the tx sweeper) fails
-    # immediately with "database is locked" instead of waiting. WAL allows
-    # concurrent readers + a single writer; this makes the writer queue.
-    # (Same mechanism as sqlite3.connect(timeout=); set via PRAGMA to be visible.)
+    # write (gunicorn runs multiple workers/threads + the tx sweeper + the
+    # letter-claim lock) fails immediately with "database is locked" instead of
+    # waiting. WAL allows concurrent readers + a single writer; this makes the
+    # writer queue. (Same mechanism as sqlite3.connect(timeout=).)
     conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
     return conn
 
@@ -58,7 +59,7 @@ def init_db() -> None:
     migrations = [
         MIGRATION_PATH, MIGRATION_002_PATH, MIGRATION_003_PATH,
         MIGRATION_004_PATH, MIGRATION_005_PATH, MIGRATION_006_PATH,
-        MIGRATION_007_PATH,
+        MIGRATION_007_PATH, MIGRATION_008_PATH,
     ]
     with get_conn() as conn:
         for path in migrations:

@@ -10,6 +10,7 @@ Deploy: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 
 Local:  PORT=5010 python app.py
 """
 
+import logging
 import os
 from datetime import datetime, timezone
 from flask import Flask, jsonify
@@ -17,8 +18,9 @@ from flask import Flask, jsonify
 from dotenv import load_dotenv
 load_dotenv()
 
+from shared.config import is_production, startup_warnings
 from shared.auth import assert_secret_configured
-from shared.db import init_db
+from shared.db import init_db, get_conn
 from loan_officer.routes import loan_bp
 from loan_officer.intake.routes import intake_bp
 from loan_officer.typeform.webhook import typeform_webhook_bp
@@ -29,18 +31,22 @@ from tx_coordinator.routes import tx_bp
 # large upload can't OOM the instance. Override with MAX_CONTENT_LENGTH_MB.
 MAX_CONTENT_LENGTH_MB = int(os.environ.get("MAX_CONTENT_LENGTH_MB", "25"))
 
+logger = logging.getLogger(__name__)
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH_MB * 1024 * 1024
 
-    # Refuse to boot in prod with the default dev secret.
+    # Refuse to boot in prod with the default/blank dev secret (auth + HMAC
+    # signing depend on it). Non-fatal config gaps are logged, not raised.
     assert_secret_configured()
+    for w in startup_warnings():
+        logger.warning("[config] %s", w)
 
-    try:
-        init_db()
-    except Exception as e:
-        print(f"[app] DB init warning: {e}")
+    # A broken schema must stop the deploy — don't boot and serve 500s on every
+    # DB-touching request behind a green health check.
+    init_db()
 
     app.register_blueprint(loan_bp)
     app.register_blueprint(intake_bp)
@@ -55,10 +61,30 @@ def create_app() -> Flask:
             "max_mb": MAX_CONTENT_LENGTH_MB,
         }), 413
 
+    @app.errorhandler(Exception)
+    def handle_uncaught(e):
+        # Always return JSON (API clients break on Flask's default HTML 500),
+        # and never leak internals to callers in production.
+        from werkzeug.exceptions import HTTPException
+        if isinstance(e, HTTPException):
+            return jsonify({"error": e.description}), e.code
+        logger.exception("unhandled exception")
+        detail = "internal server error" if is_production() else f"{type(e).__name__}: {e}"
+        return jsonify({"error": detail}), 500
+
     @app.route("/health", methods=["GET"])
     def health():
+        # Probe the DB so Render doesn't route traffic to an instance whose
+        # disk/schema is broken.
+        db_ok = True
+        try:
+            with get_conn() as conn:
+                conn.execute("SELECT 1")
+        except Exception:
+            db_ok = False
         return jsonify({
-            "status": "ok",
+            "status": "ok" if db_ok else "degraded",
+            "db": "ok" if db_ok else "error",
             "service": "loan_agents",
             "agents": ["loan_officer", "loan_processor", "intake", "tx_coordinator"],
             "personas": [
@@ -68,7 +94,7 @@ def create_app() -> Flask:
             ],
             "agent_mode": os.environ.get("TX_AGENT_MODE", "shadow"),
             "ts": datetime.now(timezone.utc).isoformat(),
-        })
+        }), (200 if db_ok else 503)
 
     @app.route("/", methods=["GET"])
     def root():
@@ -102,6 +128,7 @@ def create_app() -> Flask:
                     "by_deal":          "GET  /api/intake/deals/<deal_id>/docs",
                     "by_app":           "GET  /api/intake/applications/<app_id>/docs",
                     "completeness":     "GET  /api/intake/applications/<app_id>/completeness?product=dscr",
+                    "ocr_statements":   "POST /api/intake/ocr-statements",
                 },
                 "tx_coordinator": {
                     "open":            "POST /api/tx/open",
@@ -135,4 +162,6 @@ app = create_app()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5010))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Never enable the Werkzeug debugger in production — it's a remote shell.
+    debug = os.environ.get("FLASK_DEBUG", "0") == "1" and not is_production()
+    app.run(host="0.0.0.0", port=port, debug=debug)

@@ -48,7 +48,11 @@ def _matches(candidate: str, expected: str) -> bool:
 
 
 def require_tranchi_auth(f):
-    """Verify requests using Bearer token or X-API-Key header."""
+    """Verify requests using Bearer token or X-API-Key header.
+
+    Uses hmac.compare_digest for constant-time comparison so the secret can't
+    be recovered via a timing side-channel.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
         secret = TRANCHI_API_SECRET

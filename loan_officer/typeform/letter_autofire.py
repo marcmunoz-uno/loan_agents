@@ -108,6 +108,18 @@ def _run(intake_id: str, intake_row: dict[str, Any]) -> dict[str, Any]:
         _mark_intake(intake_id, status="letter_skipped", error="no_borrower_email")
         return {"ok": False, "skipped": "no_borrower_email"}
 
+    # Defense-in-depth credit gate. The webhook already routes declines to the
+    # soft-email path, but this protects any direct caller of the pipeline: a
+    # letter is an approval and must never go to a sub-620 / unauthorized borrower.
+    if intake_row.get("credit_pull_authorized") is False:
+        _mark_intake(intake_id, status="letter_skipped", error="credit_pull_not_authorized")
+        return {"ok": False, "skipped": "credit_pull_not_authorized"}
+    credit = _coerce_money(intake_row.get("credit_score_estimate"))
+    if credit is not None and credit < 620:
+        _mark_intake(intake_id, status="letter_skipped",
+                     error=f"credit_below_minimum ({credit:.0f} < 620)")
+        return {"ok": False, "skipped": "credit_below_minimum", "credit_score": credit}
+
     urls = [intake_row.get(f) or "" for f in _ASSET_STATEMENT_FIELDS]
     urls = [u for u in urls if u]
     if not urls:
@@ -204,9 +216,13 @@ def _download(url: str) -> tuple[bytes, str]:
     the URL host is Typeform's API; other hosts (public CDN, S3, etc.) get
     no auth.
     """
+    from shared.net import assert_safe_url
+    assert_safe_url(url)
     headers: dict[str, str] = {}
     host = (urlparse(url).hostname or "").lower()
-    if host.endswith("typeform.com"):
+    # Exact host only — don't leak the access token to an attacker-controlled
+    # *.typeform.com subdomain.
+    if host == "api.typeform.com":
         token = os.environ.get("TYPEFORM_ACCESS_TOKEN", "").strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"

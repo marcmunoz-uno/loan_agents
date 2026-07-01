@@ -137,6 +137,26 @@ class TestEndToEnd:
         # Asset statements uploaded → hand-off to autofire (stubbed here).
         assert data["email_send_status"] == "letter_pending"
 
+    def test_declined_borrower_with_statements_does_not_get_letter(self, client, monkeypatch):
+        """A sub-620 (declined) borrower who uploaded statements must NOT be
+        routed to the letter path — a letter is an approval. They get the
+        soft-decline email instead, and the autofire thread is never spawned."""
+        monkeypatch.delenv("TYPEFORM_WEBHOOK_SECRET", raising=False)
+        import loan_officer.typeform.webhook as wh
+        calls: list = []
+        monkeypatch.setattr(wh, "fire_letter_async", lambda *a, **k: calls.append(a))
+
+        body = json.dumps(_payload(credit="500", all_docs=True)).encode()
+        resp = client.post(
+            "/api/loan/webhook/typeform-submit",
+            data=body, content_type="application/json",
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["soft_prequal_status"] == "decline"
+        assert data["email_send_status"] != "letter_pending"
+        assert calls == []  # autofire never triggered for a decline
+
     def test_intake_with_asset_statements_marks_letter_pending(self, client, monkeypatch):
         """When asset statements are uploaded, the webhook should hand off to
         the autofire thread and return immediately with status=letter_pending,

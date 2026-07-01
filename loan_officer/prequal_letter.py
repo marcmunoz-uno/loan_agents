@@ -57,9 +57,9 @@ def _api_secret() -> bytes:
 
 
 def sign_letter_pdf_token(letter_id: str, expires_at_unix: int) -> str:
-    """HMAC-SHA256 of (letter_id|exp) truncated to 32 hex chars."""
+    """HMAC-SHA256 of (letter_id|exp), full 64-hex-char digest."""
     msg = f"{letter_id}|{expires_at_unix}".encode()
-    return hmac.new(_api_secret(), msg, hashlib.sha256).hexdigest()[:32]
+    return hmac.new(_api_secret(), msg, hashlib.sha256).hexdigest()
 
 
 def verify_letter_pdf_token(letter_id: str, expires_at_unix: int, token: str) -> bool:
@@ -259,11 +259,32 @@ LIQUIDITY_FIELD_KEYS = (
     "balance",
 )
 
+# A single asset statement above this is almost certainly an OCR misread
+# (account/routing number read as a balance). Skip it rather than quote a
+# multi-million-dollar max purchase price on the firm's letterhead.
+MAX_PLAUSIBLE_STATEMENT_BALANCE = 10_000_000.0
+
+
+def _account_key(fields: dict[str, Any]) -> Optional[str]:
+    """Stable identity for a bank account, to dedupe the same account across
+    consecutive monthly statements. None when we can't identify the account."""
+    bank = str(fields.get("bank_name") or "").strip().lower()
+    acct = ""
+    for k in ("account_number", "account_last4", "account", "last4"):
+        if fields.get(k):
+            acct = str(fields[k]).strip().lower()[-4:]
+            break
+    if not bank and not acct:
+        return None
+    return f"{bank}:{acct}"
+
 
 def extract_liquidity_from_intake(application_id: str) -> dict[str, Any]:
     """
-    Sum the largest extracted balance from each classified bank_stmt row for an
-    application. Returns the aggregate + a per-doc breakdown for audit.
+    Aggregate liquidity across classified bank_stmt rows. To avoid overstating,
+    statements identified as the SAME account (bank + last4) are deduped to the
+    single largest balance rather than summed across months. Balances above
+    MAX_PLAUSIBLE_STATEMENT_BALANCE are treated as OCR errors and skipped.
     """
     with get_conn() as conn:
         rows = fetchall(
@@ -274,7 +295,10 @@ def extract_liquidity_from_intake(application_id: str) -> dict[str, Any]:
         )
 
     breakdown: list[dict[str, Any]] = []
-    total = 0.0
+    # account_key -> max balance for that account. Unidentifiable accounts each
+    # get a unique synthetic key so they still count once.
+    by_account: dict[str, float] = {}
+    anon_idx = 0
     for row in rows:
         doc_type = (row.get("classified_doc_type") or row.get("declared_doc_type") or "").lower()
         if doc_type != "bank_stmt":
@@ -285,39 +309,46 @@ def extract_liquidity_from_intake(application_id: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             fields = {}
         amount = _pick_balance(fields)
+        entry = {"doc_id": row["doc_id"], "filename": row.get("filename", ""), "balance": amount}
         if amount is None:
-            breakdown.append({
-                "doc_id": row["doc_id"],
-                "filename": row.get("filename", ""),
-                "balance": None,
-                "skipped_reason": "no balance field extracted",
-            })
+            entry["skipped_reason"] = "no balance field extracted"
+            breakdown.append(entry)
             continue
-        total += amount
-        breakdown.append({
-            "doc_id": row["doc_id"],
-            "filename": row.get("filename", ""),
-            "balance": amount,
-        })
+        if amount > MAX_PLAUSIBLE_STATEMENT_BALANCE:
+            entry["balance"] = None
+            entry["skipped_reason"] = f"implausible balance {amount:.0f} (likely OCR error)"
+            breakdown.append(entry)
+            continue
+        key = _account_key(fields)
+        if key is None:
+            key = f"_anon_{anon_idx}"
+            anon_idx += 1
+        prior = by_account.get(key)
+        if prior is None or amount > prior:
+            by_account[key] = amount
+        entry["account_key"] = key
+        breakdown.append(entry)
+
+    total = round(sum(by_account.values()), 2)
     return {
-        "liquid_assets": round(total, 2),
+        "liquid_assets": total,
         "num_bank_stmts_used": sum(1 for b in breakdown if b.get("balance") is not None),
         "num_bank_stmts_skipped": sum(1 for b in breakdown if b.get("balance") is None),
+        "num_accounts": len(by_account),
         "breakdown": breakdown,
     }
 
 
 def _pick_balance(fields: dict[str, Any]) -> Optional[float]:
-    """Find the most-defensible balance field in an OCR-extracted dict."""
+    """Find the most-defensible balance field in an OCR-extracted dict.
+
+    Whitelisted keys only, in priority order. We deliberately do NOT fall back
+    to "any field containing 'balance'" — that could grab beginning_balance,
+    minimum_balance, or a different sub-account in nondeterministic dict order.
+    """
     for key in LIQUIDITY_FIELD_KEYS:
         if key in fields:
             val = _coerce_money(fields[key])
-            if val is not None:
-                return val
-    # Last resort: any field whose name *contains* "balance"
-    for k, v in fields.items():
-        if "balance" in str(k).lower():
-            val = _coerce_money(v)
             if val is not None:
                 return val
     return None
@@ -565,11 +596,15 @@ def _find_application_for_prequal(prequal_id: str) -> Optional[str]:
     return row["id"] if row else None
 
 
+MIN_LIQUID_FOR_LETTER = 5_000.0
+
+
 def generate_and_send(
     prequal_id: str,
     *,
     liquid_assets_override: Optional[float] = None,
     monthly_rent_override: Optional[float] = None,
+    min_liquid: Optional[float] = None,
     skip_send: bool = False,
 ) -> PrequalLetter:
     """
@@ -577,7 +612,9 @@ def generate_and_send(
     an override for tests / LO manual control), computes the max-PP range,
     renders the PDF, fires the Zapier hook, writes the audit row.
 
-    Raises ValueError if the prequal doesn't exist.
+    Raises ValueError if the prequal doesn't exist, if computed liquidity is
+    below `min_liquid` (autonomous callers set this so a thin file never mails
+    a letter), or if the resulting max purchase price floors at $0.
     """
     prequal = _load_prequal(prequal_id)
     if not prequal:
@@ -607,6 +644,12 @@ def generate_and_send(
             intake["source"] = "borrower_self_reported"
         liquid_assets = float(intake["liquid_assets"])
 
+    # Floor guard for autonomous callers: never mail an approval on a thin file.
+    if min_liquid is not None and liquid_assets < min_liquid:
+        raise ValueError(
+            f"liquidity ${liquid_assets:,.0f} below minimum ${min_liquid:,.0f} for prequal letter"
+        )
+
     monthly_rent = monthly_rent_override if monthly_rent_override is not None else prop.get("monthly_rent") or 0.0
     monthly_rent = float(monthly_rent or 0.0)
 
@@ -614,6 +657,13 @@ def generate_and_send(
         liquid_assets=liquid_assets,
         monthly_rent=monthly_rent if monthly_rent > 0 else None,
     )
+
+    # A $0 max purchase price means the inputs are degenerate (no liquidity /
+    # OCR found nothing). Refuse rather than email a "$0 – $5,000" letter.
+    if rng["max_pp_low"] <= 0:
+        raise ValueError(
+            f"computed max purchase price is $0 (liquid_assets=${liquid_assets:,.0f}) — refusing to send"
+        )
 
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(days=LETTER_VALIDITY_DAYS)
